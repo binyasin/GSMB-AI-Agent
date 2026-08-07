@@ -65,7 +65,14 @@ def _build_provider_if_needed() -> TelephonyProvider | None:
 
 
 def scheduler_tick() -> None:
-    """One iteration of the daily-schedule state machine (spec Sec.8-15)."""
+    """One iteration of the daily-schedule state machine (spec Sec.8-15).
+
+    Sheet sync (mirroring sheet -> local DB, read-only from the sheet's
+    perspective) is deliberately independent of whether the campaign is
+    actively calling: it's safe and cheap, and the dashboard/reports should
+    reflect fresh sheet data regardless of whether calling is paused. Only
+    actually placing/simulating a call is gated behind CALLING + RUNNING.
+    """
     settings = get_settings()
     now = now_local()
     state = compute_state(now, settings)
@@ -75,16 +82,16 @@ def scheduler_tick() -> None:
         record_state_transition(session, state, now)
         campaign_status = get_campaign_status(session)
 
-        if state == SchedulerStatus.CALLING and campaign_status == CampaignStatus.RUNNING:
-            sheet_repo = _open_sheet_repo_if_configured()
-            if sheet_repo is not None:
-                try:
-                    sheet_repo.validate_required_columns()
-                    records = sheet_repo.read_rows()
-                    build_daily_queue(session, records, job_date=now.date())
-                except SheetValidationError:
-                    logger.exception("Google Sheet failed validation; not refreshing queue this tick")
+        sheet_repo = _open_sheet_repo_if_configured()
+        if sheet_repo is not None:
+            try:
+                sheet_repo.validate_required_columns()
+                records = sheet_repo.read_rows()
+                build_daily_queue(session, records, job_date=now.date())
+            except SheetValidationError:
+                logger.exception("Google Sheet failed validation; not refreshing queue this tick")
 
+        if state == SchedulerStatus.CALLING and campaign_status == CampaignStatus.RUNNING:
             provider = _build_provider_if_needed()
             try:
                 process_next_consumer(session, telephony_provider=provider, sheet_repo=sheet_repo, job_date=now.date())

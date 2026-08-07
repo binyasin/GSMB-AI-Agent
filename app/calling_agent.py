@@ -287,6 +287,18 @@ def process_next_consumer(
     settings = get_settings()
     job_date = job_date or now_local().date()
 
+    # Fail before touching any job state if live calling was requested but
+    # isn't actually possible -- doing this check after acquire_job_lock()
+    # would leave the job permanently locked (its lock is only released by
+    # finalize_call_attempt, which we'd never reach) with no way to recover
+    # it short of a process restart.
+    if not settings.dry_run and telephony_provider is None:
+        settings.require_twilio()
+        raise NotImplementedError(
+            "Live calling requires a TelephonyProvider instance (e.g. TwilioProvider) to be supplied; "
+            "none was configured for this call."
+        )
+
     consumer = next_eligible_consumer(session, job_date)
     if consumer is None:
         return None
@@ -319,13 +331,8 @@ def process_next_consumer(
         log_event(session, attempt.id, "dry_run_simulated", {"intent": decision.intent.value})
         return attempt
 
-    if telephony_provider is None:
-        settings.require_twilio()
-        raise NotImplementedError(
-            "Live calling requires a TelephonyProvider instance (e.g. TwilioProvider) to be supplied; "
-            "none was configured for this call."
-        )
-
+    # telephony_provider is guaranteed non-None here (checked before any job
+    # state was touched, above).
     base_url = settings.public_base_url
     voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
     status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"

@@ -147,3 +147,30 @@ def test_retry_pending_sheet_syncs_recovers_after_outage(db_session):
     assert synced_count == 1
     db_session.refresh(attempt)
     assert attempt.sheet_synced is True
+
+
+def test_missing_telephony_provider_fails_before_locking_the_job(db_session, monkeypatch):
+    """A live-calling attempt with no TelephonyProvider available must fail
+    before acquiring the job lock or creating a CallAttempt -- otherwise the
+    job is left locked forever with no finalize_call_attempt ever reached to
+    release it (see app/calling_agent.py process_next_consumer)."""
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("TEST_MODE", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    _seed_queue(db_session)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=JOB_DATE).one()
+    assert job.locked_at is None
+    assert job.attempt_count == 0
+
+    with pytest.raises(Exception):
+        process_next_consumer(db_session, telephony_provider=None, job_date=JOB_DATE)
+
+    db_session.refresh(job)
+    assert job.locked_at is None  # never acquired -- not left dangling
+    assert job.attempt_count == 0  # no orphaned CallAttempt was created
+
+    attempts_created = db_session.query(CallAttempt).filter_by(consumer_no="CN-001").count()
+    assert attempts_created == 0

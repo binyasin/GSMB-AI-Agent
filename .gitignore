@@ -20,3 +20,4 @@ reports/*.csv
 *.key.json
 service-account*.json
 secrets/
+.vscode/

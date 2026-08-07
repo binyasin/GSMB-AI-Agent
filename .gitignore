@@ -19,3 +19,4 @@ reports/*.xlsx
 reports/*.csv
 *.key.json
 service-account*.json
+secrets/

@@ -12,9 +12,19 @@ from app.schemas import ALL_SHEET_COLUMNS
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache():
-    from app.config import get_settings
+def _clear_settings_cache(monkeypatch):
+    """Isolate tests from whatever real .env happens to exist on disk.
 
+    Settings.model_config normally points at ".env" so the live app picks
+    up real credentials automatically -- but that means, once a real .env
+    exists (e.g. after wiring up Twilio/Google Sheets), every test would
+    silently inherit those real credentials instead of the field defaults
+    a test expects, and some would start making live network calls. Each
+    test gets pure field-defaults-plus-whatever-it-explicitly-monkeypatches.
+    """
+    from app.config import Settings, get_settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

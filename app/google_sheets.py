@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Protocol
 
 from app.config import ConfigurationError, Settings, get_settings
@@ -22,6 +23,21 @@ logger = logging.getLogger("calls")
 
 class SheetValidationError(RuntimeError):
     """Raised when the worksheet's headers don't satisfy the minimum contract."""
+
+
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def _normalize_header(raw: str) -> str:
+    """Collapse any whitespace run (including embedded newlines from a
+    wrapped header cell, e.g. "Consumer\\n No.") into a single space.
+
+    Real spreadsheets accumulate this kind of cosmetic formatting quirk
+    (Alt+Enter line wraps in a header cell, trailing spaces) with no
+    semantic meaning — matching headers should be robust to it rather than
+    requiring a byte-for-byte match against the exact cell contents.
+    """
+    return _WHITESPACE_RUN.sub(" ", raw).strip()
 
 
 class WorksheetLike(Protocol):
@@ -87,7 +103,7 @@ class GoogleSheetRepository:
         values = self.worksheet.get_all_values()
         if not values:
             return []
-        return [h.strip() for h in values[0]]
+        return [_normalize_header(h) for h in values[0]]
 
     def validate_required_columns(self) -> None:
         headers = self.get_headers()
@@ -109,7 +125,7 @@ class GoogleSheetRepository:
         values = self.worksheet.get_all_values()
         if len(values) < 2:
             return []
-        headers = [h.strip() for h in values[0]]
+        headers = self.get_headers()
         records = []
         for raw_row in values[1:]:
             row = dict(zip(headers, raw_row + [""] * (len(headers) - len(raw_row))))
@@ -125,7 +141,7 @@ class GoogleSheetRepository:
         values = self.worksheet.get_all_values()
         if not values:
             return None
-        headers = [h.strip() for h in values[0]]
+        headers = self.get_headers()
         if CONSUMER_NO_COLUMN not in headers:
             return None
         col_idx = headers.index(CONSUMER_NO_COLUMN)

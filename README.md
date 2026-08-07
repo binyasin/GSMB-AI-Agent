@@ -25,7 +25,7 @@ Cloud, or Anthropic account**:
 | Component | Status |
 |---|---|
 | Database layer (SQLite, all 8 tables) | ✅ Verified — 126 automated tests pass |
-| Google Sheets read/write logic (header-based, validation, retry) | ✅ Verified against a fixture worksheet. Real `gspread` auth code path is written and correct against the documented API, but **not exercised against a real spreadsheet** — needs `GOOGLE_SERVICE_ACCOUNT_JSON`/`FILE` + `GOOGLE_SPREADSHEET_ID` |
+| Google Sheets read/write logic (header-based, validation, retry) | ✅ Verified against a fixture worksheet **and against GSM Brothers' real live spreadsheet**: read all 200 real consumer rows correctly, validated real headers (including catching/fixing an embedded-newline header-cell quirk — see `_normalize_header`), and did a full write-back round trip (append → update → read-back confirmed → cleanup) on a throwaway test row, never touching real consumer data |
 | Queue eligibility filtering | ✅ Verified |
 | Daily scheduler state machine (all clock points in the spec, restart recovery) | ✅ Verified |
 | Duplicate-call protection (atomic lock, stale-lock recovery) | ✅ Verified |

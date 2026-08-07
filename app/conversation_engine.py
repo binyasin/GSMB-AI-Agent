@@ -284,7 +284,8 @@ def keyword_fallback_classifier(
     for classify_with_llm in production — see README "AI provider setup"."""
     text = utterance.lower()
 
-    if any(p in text for p in ("don't call", "do not call", "stop calling", "mat karo call")):
+    _dnc_phrases = ("don't call", "do not call", "stop calling", "mat karo call", "call mat karo", "call mat karna", "call na karo", "call band karo")
+    if any(p in text for p in _dnc_phrases) or ("call" in text and any(p in text for p in ("mat karna", "mat karo", "na karo", "band karo"))):
         return CallDecision(intent=CustomerIntent.DO_NOT_CALL, do_not_call=True, human_followup=False)
 
     if stage == ClassificationStage.VERIFY_IDENTITY:
@@ -296,13 +297,14 @@ def keyword_fallback_classifier(
 
     if any(p in text for p in ("already paid", "maine pay kar", "pay kar diya")):
         return CallDecision(intent=CustomerIntent.ALREADY_PAID, human_followup=True)
-    if any(p in text for p in ("dispute", "wrong amount", "not correct", "galat bill")):
+    _dispute_phrases = ("dispute", "wrong amount", "not correct", "galat bill", "sahi nahi", "galat hai")
+    if any(p in text for p in _dispute_phrases) or ("galat" in text and any(p in text for p in ("bill", "amount", "hisab"))):
         return CallDecision(intent=CustomerIntent.DISPUTE, human_followup=True)
     if any(p in text for p in ("installment", "qist", "scheme")):
         return CallDecision(intent=CustomerIntent.INSTALLMENT_REQUEST, human_followup=True)
     if any(p in text for p in ("human", "representative", "agent", "insaan")):
         return CallDecision(intent=CustomerIntent.HUMAN_ASSISTANCE, human_followup=True)
-    if any(p in text for p in ("not interested", "nahi karna")):
+    if any(p in text for p in ("not interested", "nahi karna", "dilchaspi nahi", "interest nahi")):
         return CallDecision(intent=CustomerIntent.NOT_INTERESTED)
     if any(p in text for p in ("call back", "callback", "baad mein call")):
         return CallDecision(intent=CustomerIntent.CALL_BACK, human_followup=True)

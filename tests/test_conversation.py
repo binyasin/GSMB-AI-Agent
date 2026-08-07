@@ -13,6 +13,7 @@ from app.conversation_engine import (
     _sanitize_decision,
     classify_with_llm,
     dues_line,
+    keyword_fallback_classifier,
     scheme_line,
 )
 from app.schemas import CallDecision, ConsumerRecord, CustomerIntent, SupportedLanguage
@@ -236,3 +237,49 @@ def test_classify_with_llm_falls_back_safely_on_invalid_payload(mocker):
     decision = classify_with_llm(ClassificationStage.MAIN_RESPONSE, _consumer(), "garbled", [], settings=settings)
     assert decision.intent == CustomerIntent.OTHER
     assert decision.human_followup is True
+
+
+# ---------------------------------------------------------------------------
+# keyword_fallback_classifier: natural Urdu phrasing coverage (regression
+# tests for gaps found while demonstrating scenarios manually)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Mujhe dobara kabhi call mat karna.",
+        "Aage se call mat karo.",
+        "Please call na karo mujhe.",
+        "Do not call me again.",
+    ],
+)
+def test_keyword_fallback_detects_do_not_call_variants(utterance):
+    decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
+    assert decision.intent == CustomerIntent.DO_NOT_CALL
+    assert decision.do_not_call is True
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Ye bill ka amount galat hai, main is se agree nahi karta.",
+        "Ye hisab galat hai.",
+        "This amount is not correct.",
+    ],
+)
+def test_keyword_fallback_detects_dispute_variants(utterance):
+    decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
+    assert decision.intent == CustomerIntent.DISPUTE
+    assert decision.human_followup is True
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Mujhe is mein koi interest nahi hai.",
+        "Mujhe dilchaspi nahi hai.",
+        "I'm not interested.",
+    ],
+)
+def test_keyword_fallback_detects_not_interested_variants(utterance):
+    decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
+    assert decision.intent == CustomerIntent.NOT_INTERESTED

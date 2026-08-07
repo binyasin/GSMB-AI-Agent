@@ -1,0 +1,47 @@
+services:
+  app:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    command: ["python", "-m", "streamlit", "run", "app/dashboard.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # Optional PostgreSQL backend for production (spec Sec.34: SQLite now,
+  # PostgreSQL-ready later). Enable with: docker compose --profile postgres up
+  # and set DATABASE_URL=postgresql+psycopg2://gsm:gsm@postgres:5432/gsm_recovery
+  # in .env (also add psycopg2-binary to requirements.txt).
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: gsm
+      POSTGRES_PASSWORD: gsm
+      POSTGRES_DB: gsm_recovery
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

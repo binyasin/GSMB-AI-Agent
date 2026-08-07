@@ -1,0 +1,48 @@
+# --- Core web / API ---
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20
+websockets>=14.1
+
+# --- Config / validation ---
+pydantic>=2.10.4
+pydantic-settings>=2.7.1
+python-dotenv>=1.0.1
+
+# --- Database ---
+SQLAlchemy>=2.0.36
+
+# --- Google Sheets ---
+gspread>=6.1.4
+google-auth>=2.37.0
+
+# --- Telephony ---
+twilio>=9.4.3
+
+# --- Speech (Google Cloud STT/TTS) ---
+google-cloud-speech>=2.29.0
+google-cloud-texttospeech>=2.21.1
+audioop-lts>=0.2.1; python_version >= "3.13"
+
+# --- AI / LLM (conversation NLU) ---
+anthropic>=0.40.0
+
+# --- Scheduling ---
+APScheduler>=3.11.0
+tzdata>=2024.2
+
+# --- Dashboard ---
+streamlit>=1.51.0
+pandas>=2.3.3
+
+# --- Reporting ---
+openpyxl>=3.1.5
+
+# --- Logging ---
+structlog>=24.4.0
+
+# --- Testing ---
+pytest>=8.3.4
+pytest-mock>=3.14.0
+httpx>=0.28.1
+freezegun>=1.5.1

@@ -83,48 +83,68 @@ class SupportedLanguage(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Google Sheet row contract (spec Sec.5) — required minimum columns
+# Google Sheet row contract — this matches GSM Brothers' actual live sheet
+# (spec Sec.5's column list was a hypothetical starting point; this project
+# was retargeted to the real headers below once real data was available).
+#
+# Notable differences from the original hypothetical schema:
+#   - There is no dedicated "Already Paid" / "Do Not Call" / "Human Follow-up"
+#     column. Per an explicit decision, these are derived from the text in
+#     "Call Status" / "Call out come" (see `_derive_already_paid` /
+#     `_derive_do_not_call` / `_derive_human_followup` below) rather than
+#     requiring new sheet columns. The local DoNotCall DB registry
+#     (app/models.py) remains the authoritative compliance backstop
+#     regardless of how this heuristic reads any given row.
+#   - "DUES" is the single figure read aloud to consumers as the outstanding
+#     balance (not "Total Due Billing" or "Recovery Amount", which are
+#     stored but never spoken).
+#   - CD, MRU, DUE BCM, LPD, LPA, IBC are opaque K-Electric reference codes:
+#     stored/passed through untouched, no call-script or eligibility logic
+#     is built on their meaning.
 # ---------------------------------------------------------------------------
+CONSUMER_NO_COLUMN = "Consumer No."
+
 REQUIRED_SHEET_COLUMNS = [
-    "Consumer No",
-    "Consumer Name",
-    "Mobile Number",
-    "Outstanding Amount",
-    "Due Date",
+    "Consumer No.",
+    "Name",
+    "Consumer Phone Number",
+    "DUES",
     "Call Status",
-    "Last Call Date",
+    "Call Date",
 ]
 
 ALL_SHEET_COLUMNS = [
-    "Consumer No",
-    "Consumer Name",
-    "Father Name",
-    "Mobile Number",
+    "SNo",
+    "Contract",
+    "Contract Account",
+    "Consumer No.",
+    "Meter No.",
+    "CD",
+    "MRU",
+    "Name",
     "Address",
-    "Outstanding Amount",
-    "Current Bill",
-    "Arrears",
-    "Due Date",
-    "Tariff",
-    "Installment Eligible",
-    "Installment Details",
-    "Scheme Available",
-    "Scheme Description",
-    "Status",
-    "Already Paid",
-    "Promise To Pay Date",
+    "Rate Tariff",
+    "DUE BCM",
+    "Total Due Units",
+    "Total Due Billing",
+    "LPD",
+    "LPA",
+    "DUES",
+    "Scheme eligibility",
+    "Consumer Phone Number",
+    "IBC",
+    "Recovery Amount",
     "Remarks",
-    "Call Attempt",
+    "Call Date",
+    "Call Time",
+    "Call Atempt",
     "Call Status",
-    "Call Outcome",
-    "Call Duration",
+    "Call out come",
     "Transcript",
     "Recording URL",
-    "Last Call Date",
-    "Last Call Time",
+    "Promise to Pay",
+    "Date",
     "Agent Notes",
-    "Human Follow-up",
-    "Do Not Call",
 ]
 
 
@@ -155,18 +175,68 @@ def _date(value: str | None) -> dt.date | None:
     return None
 
 
+_PAID_WORDS = ("PAID", "ALREADY PAID", "ALREADY_PAID")
+_UNPAID_NEGATIONS = ("UNPAID", "NOT PAID", "NOT_PAID")
+_DNC_WORDS = ("DO NOT CALL", "DO_NOT_CALL", "DNC")
+_HUMAN_FOLLOWUP_OUTCOMES = ("DISPUTE", "INSTALLMENT_REQUEST", "HUMAN_ASSISTANCE", "ALREADY_PAID")
+
+
+def _derive_already_paid(call_status: str | None, call_outcome: str | None) -> AlreadyPaidStatus:
+    """No dedicated 'Already Paid' column exists in the real sheet — this is
+    read from Call Status / Call out come text instead (see module docstring)."""
+    outcome = (call_outcome or "").strip().upper()
+    if outcome == "ALREADY_PAID":
+        return AlreadyPaidStatus.CUSTOMER_CLAIMS_PAID
+    status = (call_status or "").strip().upper()
+    if any(neg in status for neg in _UNPAID_NEGATIONS):
+        return AlreadyPaidStatus.NO
+    if any(word in status for word in _PAID_WORDS):
+        return AlreadyPaidStatus.CUSTOMER_CLAIMS_PAID
+    return AlreadyPaidStatus.NO
+
+
+def _derive_do_not_call(call_status: str | None, call_outcome: str | None) -> bool:
+    """No dedicated 'Do Not Call' column — derived from Call Status / Call out
+    come text. The local DoNotCall DB registry is the authoritative backstop
+    regardless of this heuristic (see app/queue_manager.py)."""
+    outcome = (call_outcome or "").strip().upper()
+    if outcome == "DO_NOT_CALL":
+        return True
+    status = (call_status or "").strip().upper()
+    return any(word in status for word in _DNC_WORDS)
+
+
+def _derive_human_followup(call_outcome: str | None) -> bool:
+    return (call_outcome or "").strip().upper() in _HUMAN_FOLLOWUP_OUTCOMES
+
+
 class ConsumerRecord(BaseModel):
     """A validated, typed view of one Google Sheet row, built by header name."""
 
     consumer_no: str
     consumer_name: str | None = None
-    father_name: str | None = None
     mobile_number: str | None = None
     address: str | None = None
-    outstanding_amount: float | None = None
-    current_bill: float | None = None
-    arrears: float | None = None
-    due_date: dt.date | None = None
+
+    # Reference/identifier fields, pass-through only — never used in call-script
+    # or eligibility logic.
+    sno: str | None = None
+    contract: str | None = None
+    contract_account: str | None = None
+    meter_no: str | None = None
+    cd: str | None = None
+    mru: str | None = None
+    due_bcm: str | None = None
+    lpd: str | None = None
+    lpa: str | None = None
+    ibc: str | None = None
+
+    outstanding_amount: float | None = None  # sourced from "DUES" — the figure spoken to consumers
+    total_due_units: float | None = None
+    total_due_billing: float | None = None
+    recovery_amount: float | None = None
+
+    due_date: dt.date | None = None  # no source column in the real sheet; stays None
     tariff: str | None = None
     installment_eligible: bool = False
     installment_details: str | None = None
@@ -174,6 +244,7 @@ class ConsumerRecord(BaseModel):
     scheme_description: str | None = None
     status: str | None = None
     already_paid: AlreadyPaidStatus = AlreadyPaidStatus.NO
+    promise_to_pay_flag: str | None = None
     promise_to_pay_date: dt.date | None = None
     remarks: str | None = None
     call_attempt: int = 0
@@ -191,43 +262,54 @@ class ConsumerRecord(BaseModel):
     @classmethod
     def from_row(cls, row: dict[str, str]) -> "ConsumerRecord":
         """Build from a {header_name: cell_value} dict (header lookup, not position)."""
-        already_paid_raw = (row.get("Already Paid") or "").strip().upper()
-        already_paid = AlreadyPaidStatus.NO
-        if already_paid_raw in ("YES", "Y", "TRUE", "1"):
-            already_paid = AlreadyPaidStatus.YES
-        elif already_paid_raw == "CUSTOMER_CLAIMS_PAID":
-            already_paid = AlreadyPaidStatus.CUSTOMER_CLAIMS_PAID
+        call_status = (row.get("Call Status") or "").strip() or None
+        call_outcome = (row.get("Call out come") or "").strip() or None
+        scheme_eligibility_raw = (row.get("Scheme eligibility") or "").strip() or None
 
         return cls(
-            consumer_no=(row.get("Consumer No") or "").strip(),
-            consumer_name=(row.get("Consumer Name") or "").strip() or None,
-            father_name=(row.get("Father Name") or "").strip() or None,
-            mobile_number=(row.get("Mobile Number") or "").strip() or None,
+            consumer_no=(row.get("Consumer No.") or "").strip(),
+            consumer_name=(row.get("Name") or "").strip() or None,
+            mobile_number=(row.get("Consumer Phone Number") or "").strip() or None,
             address=(row.get("Address") or "").strip() or None,
-            outstanding_amount=_num(row.get("Outstanding Amount")),
-            current_bill=_num(row.get("Current Bill")),
-            arrears=_num(row.get("Arrears")),
+            sno=(row.get("SNo") or "").strip() or None,
+            contract=(row.get("Contract") or "").strip() or None,
+            contract_account=(row.get("Contract Account") or "").strip() or None,
+            meter_no=(row.get("Meter No.") or "").strip() or None,
+            cd=(row.get("CD") or "").strip() or None,
+            mru=(row.get("MRU") or "").strip() or None,
+            due_bcm=(row.get("DUE BCM") or "").strip() or None,
+            lpd=(row.get("LPD") or "").strip() or None,
+            lpa=(row.get("LPA") or "").strip() or None,
+            ibc=(row.get("IBC") or "").strip() or None,
+            outstanding_amount=_num(row.get("DUES")),
+            total_due_units=_num(row.get("Total Due Units")),
+            total_due_billing=_num(row.get("Total Due Billing")),
+            recovery_amount=_num(row.get("Recovery Amount")),
             due_date=_date(row.get("Due Date")),
-            tariff=(row.get("Tariff") or "").strip() or None,
-            installment_eligible=_yes(row.get("Installment Eligible")),
-            installment_details=(row.get("Installment Details") or "").strip() or None,
-            scheme_available=_yes(row.get("Scheme Available")),
-            scheme_description=(row.get("Scheme Description") or "").strip() or None,
+            tariff=(row.get("Rate Tariff") or "").strip() or None,
+            installment_eligible=bool(
+                scheme_eligibility_raw
+                and scheme_eligibility_raw.strip().upper() not in ("NO", "NOT ELIGIBLE", "N", "0", "FALSE", "INELIGIBLE", "NONE")
+            ),
+            installment_details=None,
+            scheme_available=bool(scheme_eligibility_raw),
+            scheme_description=scheme_eligibility_raw,
             status=(row.get("Status") or "").strip() or None,
-            already_paid=already_paid,
-            promise_to_pay_date=_date(row.get("Promise To Pay Date")),
+            already_paid=_derive_already_paid(call_status, call_outcome),
+            promise_to_pay_flag=(row.get("Promise to Pay") or "").strip() or None,
+            promise_to_pay_date=_date(row.get("Date")),
             remarks=(row.get("Remarks") or "").strip() or None,
-            call_attempt=int(_num(row.get("Call Attempt")) or 0),
-            call_status=(row.get("Call Status") or "").strip() or None,
-            call_outcome=(row.get("Call Outcome") or "").strip() or None,
-            call_duration=int(_num(row.get("Call Duration")) or 0) or None,
+            call_attempt=int(_num(row.get("Call Atempt")) or 0),
+            call_status=call_status,
+            call_outcome=call_outcome,
+            call_duration=None,
             transcript=(row.get("Transcript") or "").strip() or None,
             recording_url=(row.get("Recording URL") or "").strip() or None,
-            last_call_date=_date(row.get("Last Call Date")),
-            last_call_time=(row.get("Last Call Time") or "").strip() or None,
+            last_call_date=_date(row.get("Call Date")),
+            last_call_time=(row.get("Call Time") or "").strip() or None,
             agent_notes=(row.get("Agent Notes") or "").strip() or None,
-            human_followup=_yes(row.get("Human Follow-up")),
-            do_not_call=_yes(row.get("Do Not Call")),
+            human_followup=_derive_human_followup(call_outcome),
+            do_not_call=_derive_do_not_call(call_status, call_outcome),
         )
 
 

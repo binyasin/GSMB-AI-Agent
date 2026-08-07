@@ -79,12 +79,6 @@ def dues_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
     if due:
         parts_ur.append(f"due date {due} hai")
         parts_en.append(f"with a due date of {due}")
-    if consumer.current_bill:
-        parts_ur.append(f"current bill {_money(consumer.current_bill)} hai")
-        parts_en.append(f"the current bill is {_money(consumer.current_bill)}")
-    if consumer.arrears:
-        parts_ur.append(f"arrears {_money(consumer.arrears)} hain")
-        parts_en.append(f"arrears amount to {_money(consumer.arrears)}")
 
     if language == SupportedLanguage.URDU:
         if not parts_ur:

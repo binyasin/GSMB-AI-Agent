@@ -41,13 +41,26 @@ class Consumer(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     consumer_no: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     consumer_name: Mapped[str | None] = mapped_column(String(255))
-    father_name: Mapped[str | None] = mapped_column(String(255))
     mobile_number: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
 
-    outstanding_amount: Mapped[float | None] = mapped_column(Numeric(14, 2))
-    current_bill: Mapped[float | None] = mapped_column(Numeric(14, 2))
-    arrears: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    # Opaque K-Electric reference/identifier fields — stored/passed through
+    # only, no call-script or eligibility logic depends on their meaning.
+    sno: Mapped[str | None] = mapped_column(String(32))
+    contract: Mapped[str | None] = mapped_column(String(64))
+    contract_account: Mapped[str | None] = mapped_column(String(64))
+    meter_no: Mapped[str | None] = mapped_column(String(64))
+    cd: Mapped[str | None] = mapped_column(String(64))
+    mru: Mapped[str | None] = mapped_column(String(64))
+    due_bcm: Mapped[str | None] = mapped_column(String(64))
+    lpd: Mapped[str | None] = mapped_column(String(64))
+    lpa: Mapped[str | None] = mapped_column(String(64))
+    ibc: Mapped[str | None] = mapped_column(String(64))
+
+    outstanding_amount: Mapped[float | None] = mapped_column(Numeric(14, 2))  # from "DUES" — spoken to consumers
+    total_due_units: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    total_due_billing: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    recovery_amount: Mapped[float | None] = mapped_column(Numeric(14, 2))
     due_date: Mapped[dt.date | None] = mapped_column(Date)
     tariff: Mapped[str | None] = mapped_column(String(64))
 
@@ -58,6 +71,7 @@ class Consumer(Base):
 
     status: Mapped[str | None] = mapped_column(String(64))
     already_paid: Mapped[str] = mapped_column(String(32), default="NO")
+    promise_to_pay_flag: Mapped[str | None] = mapped_column(String(32))
     promise_to_pay_date: Mapped[dt.date | None] = mapped_column(Date)
     remarks: Mapped[str | None] = mapped_column(Text)
 

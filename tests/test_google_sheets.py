@@ -23,19 +23,19 @@ def test_validate_required_columns_passes_for_full_schema():
 
 
 def test_validate_required_columns_raises_when_missing():
-    ws = FakeWorksheet(headers=["Consumer No", "Consumer Name"])
+    ws = FakeWorksheet(headers=["Consumer No.", "Name"])
     with pytest.raises(SheetValidationError) as exc:
         GoogleSheetRepository(ws).validate_required_columns()
-    assert "Mobile Number" in str(exc.value)
-    assert "Outstanding Amount" in str(exc.value)
+    assert "Consumer Phone Number" in str(exc.value)
+    assert "DUES" in str(exc.value)
 
 
 def test_missing_optional_columns_handled_gracefully():
     # Only the required minimum columns are present; everything else should
     # default rather than raise.
     ws = FakeWorksheet(
-        headers=["Consumer No", "Consumer Name", "Mobile Number", "Outstanding Amount", "Due Date", "Call Status", "Last Call Date"],
-        rows=[["CN-100", "Test User", "03001112233", "1000", "2026-08-15", "PENDING", ""]],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date"],
+        rows=[["CN-100", "Test User", "03001112233", "1000", "PENDING", ""]],
     )
     records = GoogleSheetRepository(ws).read_rows()
     assert len(records) == 1
@@ -43,10 +43,10 @@ def test_missing_optional_columns_handled_gracefully():
     assert records[0].installment_details is None
 
 
-def test_already_paid_customer_claims_paid_parsed():
+def test_already_paid_derived_from_call_outcome_text():
     ws = FakeWorksheet(
-        headers=["Consumer No", "Consumer Name", "Mobile Number", "Outstanding Amount", "Due Date", "Call Status", "Last Call Date", "Already Paid"],
-        rows=[["CN-200", "Test User", "03001112233", "1000", "2026-08-15", "PENDING", "", "CUSTOMER_CLAIMS_PAID"]],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date", "Call out come"],
+        rows=[["CN-200", "Test User", "03001112233", "1000", "COMPLETED", "", "ALREADY_PAID"]],
     )
     records = GoogleSheetRepository(ws).read_rows()
     assert records[0].already_paid == AlreadyPaidStatus.CUSTOMER_CLAIMS_PAID
@@ -54,8 +54,8 @@ def test_already_paid_customer_claims_paid_parsed():
 
 def test_blank_consumer_no_rows_skipped():
     ws = FakeWorksheet(
-        headers=["Consumer No", "Consumer Name", "Mobile Number", "Outstanding Amount", "Due Date", "Call Status", "Last Call Date"],
-        rows=[["", "Blank Row", "", "", "", "", ""]],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date"],
+        rows=[["", "Blank Row", "", "", "", ""]],
     )
     assert GoogleSheetRepository(ws).read_rows() == []
 
@@ -70,7 +70,7 @@ def test_find_row_number_by_consumer_no():
 def test_update_row_by_consumer_no_writes_correct_cells():
     ws = make_sample_worksheet()
     repo = GoogleSheetRepository(ws)
-    repo.update_row_by_consumer_no("CN-001", {"Call Status": "COMPLETED", "Call Outcome": "PROMISE_TO_PAY"})
+    repo.update_row_by_consumer_no("CN-001", {"Call Status": "COMPLETED", "Call out come": "PROMISE_TO_PAY"})
 
     records = repo.read_rows()
     updated = next(r for r in records if r.consumer_no == "CN-001")
@@ -90,3 +90,52 @@ def test_update_row_unknown_column_raises():
     ws = make_sample_worksheet()
     with pytest.raises(SheetValidationError):
         GoogleSheetRepository(ws).update_row_by_consumer_no("CN-001", {"Not A Real Column": "X"})
+
+
+# ---------------------------------------------------------------------------
+# Derived-from-text heuristics (no dedicated Already Paid / Do Not Call /
+# Human Follow-up columns exist in the real sheet — see app/schemas.py)
+# ---------------------------------------------------------------------------
+_BASE_HEADERS = ["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date", "Call out come"]
+
+
+def _row_with(call_status: str = "", call_outcome: str = "") -> "FakeWorksheet":
+    return FakeWorksheet(_BASE_HEADERS, [["CN-X", "Test", "03001112233", "1000", call_status, "", call_outcome]])
+
+
+@pytest.mark.parametrize("call_status", ["Do Not Call", "DNC", "do not call please", "DO_NOT_CALL"])
+def test_do_not_call_derived_from_call_status_text(call_status):
+    records = GoogleSheetRepository(_row_with(call_status=call_status)).read_rows()
+    assert records[0].do_not_call is True
+
+
+def test_do_not_call_derived_from_call_outcome():
+    records = GoogleSheetRepository(_row_with(call_outcome="DO_NOT_CALL")).read_rows()
+    assert records[0].do_not_call is True
+
+
+def test_do_not_call_not_triggered_by_unrelated_status():
+    records = GoogleSheetRepository(_row_with(call_status="PENDING")).read_rows()
+    assert records[0].do_not_call is False
+
+
+@pytest.mark.parametrize("call_status", ["Already Paid", "Paid in full", "PAID"])
+def test_already_paid_derived_from_call_status_text(call_status):
+    records = GoogleSheetRepository(_row_with(call_status=call_status)).read_rows()
+    assert records[0].already_paid == AlreadyPaidStatus.CUSTOMER_CLAIMS_PAID
+
+
+@pytest.mark.parametrize("call_status", ["Unpaid", "Not Paid", "PENDING"])
+def test_already_paid_negation_guard_avoids_false_positive(call_status):
+    records = GoogleSheetRepository(_row_with(call_status=call_status)).read_rows()
+    assert records[0].already_paid == AlreadyPaidStatus.NO
+
+
+def test_human_followup_derived_from_dispute_outcome():
+    records = GoogleSheetRepository(_row_with(call_outcome="DISPUTE")).read_rows()
+    assert records[0].human_followup is True
+
+
+def test_human_followup_false_for_ordinary_outcome():
+    records = GoogleSheetRepository(_row_with(call_outcome="WILL_PAY_TODAY")).read_rows()
+    assert records[0].human_followup is False

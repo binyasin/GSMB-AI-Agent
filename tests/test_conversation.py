@@ -36,19 +36,17 @@ def _consumer(**overrides) -> ConsumerRecord:
 # Templates never invent figures (spec Sec.2, Sec.22, Sec.24)
 # ---------------------------------------------------------------------------
 def test_dues_line_only_mentions_available_fields():
-    consumer = _consumer(outstanding_amount=None, due_date=None, current_bill=None, arrears=None)
+    consumer = _consumer(outstanding_amount=None, due_date=None)
     line = dues_line(consumer, SupportedLanguage.ENGLISH)
     assert "None" not in line
     assert "not available" in line
 
 
 def test_dues_line_includes_all_present_fields():
-    consumer = _consumer(outstanding_amount=12500, due_date=dt.date(2026, 8, 15), current_bill=2500, arrears=10000)
+    consumer = _consumer(outstanding_amount=12500, due_date=dt.date(2026, 8, 15))
     line = dues_line(consumer, SupportedLanguage.ENGLISH)
     assert "12,500" in line
     assert "15-08-2026" in line
-    assert "2,500" in line
-    assert "10,000" in line
 
 
 def test_scheme_line_absent_when_not_eligible():

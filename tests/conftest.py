@@ -66,77 +66,64 @@ class FakeWorksheet:
 
 
 def make_sample_worksheet() -> FakeWorksheet:
+    """Uses GSM Brothers' real sheet column headers (app.schemas.ALL_SHEET_COLUMNS).
+
+    There's no dedicated Already Paid / Do Not Call column in the real
+    sheet — CN-002/CN-003 below exercise the Call Status text heuristic
+    (see app/schemas.py `_derive_already_paid` / `_derive_do_not_call`).
+    """
     headers = ALL_SHEET_COLUMNS
-    today = dt.date.today()
     rows = [
         _row(
             headers,
             {
-                "Consumer No": "CN-001",
-                "Consumer Name": "Ali Raza",
-                "Father Name": "Ahmed Raza",
-                "Mobile Number": "03001234567",
+                "Consumer No.": "CN-001",
+                "Name": "Ali Raza",
+                "Consumer Phone Number": "03001234567",
                 "Address": "House 1, Karachi",
-                "Outstanding Amount": "12500",
-                "Current Bill": "2500",
-                "Arrears": "10000",
-                "Due Date": today.isoformat(),
-                "Tariff": "A1",
-                "Installment Eligible": "YES",
-                "Installment Details": "3 installments of Rs. 4167",
-                "Scheme Available": "YES",
-                "Scheme Description": "Standard K-Electric relief scheme",
-                "Status": "Active",
-                "Already Paid": "NO",
-                "Call Status": "PENDING",
-                "Do Not Call": "NO",
-                "Human Follow-up": "NO",
-            },
-        ),
-        _row(
-            headers,
-            {
-                "Consumer No": "CN-002",
-                "Consumer Name": "Sana Tariq",
-                "Mobile Number": "03211112222",
-                "Outstanding Amount": "5000",
-                "Due Date": today.isoformat(),
-                "Call Status": "PENDING",
-                "Already Paid": "YES",
-                "Do Not Call": "NO",
-            },
-        ),
-        _row(
-            headers,
-            {
-                "Consumer No": "CN-003",
-                "Consumer Name": "Bilal Khan",
-                "Mobile Number": "03451234567",
-                "Outstanding Amount": "8000",
-                "Due Date": today.isoformat(),
-                "Call Status": "PENDING",
-                "Do Not Call": "YES",
-            },
-        ),
-        _row(
-            headers,
-            {
-                "Consumer No": "CN-004",
-                "Consumer Name": "Nadia Yousuf",
-                "Mobile Number": "not-a-number",
-                "Outstanding Amount": "3000",
-                "Due Date": today.isoformat(),
+                "DUES": "12500",
+                "Rate Tariff": "A1",
+                "Scheme eligibility": "3 installments of Rs. 4167",
                 "Call Status": "PENDING",
             },
         ),
         _row(
             headers,
             {
-                "Consumer No": "CN-005",
-                "Consumer Name": "Usman Ghani",
-                "Mobile Number": "03009998877",
-                "Outstanding Amount": "15000",
-                "Due Date": today.isoformat(),
+                "Consumer No.": "CN-002",
+                "Name": "Sana Tariq",
+                "Consumer Phone Number": "03211112222",
+                "DUES": "5000",
+                "Call Status": "Already Paid",
+            },
+        ),
+        _row(
+            headers,
+            {
+                "Consumer No.": "CN-003",
+                "Name": "Bilal Khan",
+                "Consumer Phone Number": "03451234567",
+                "DUES": "8000",
+                "Call Status": "Do Not Call",
+            },
+        ),
+        _row(
+            headers,
+            {
+                "Consumer No.": "CN-004",
+                "Name": "Nadia Yousuf",
+                "Consumer Phone Number": "not-a-number",
+                "DUES": "3000",
+                "Call Status": "PENDING",
+            },
+        ),
+        _row(
+            headers,
+            {
+                "Consumer No.": "CN-005",
+                "Name": "Usman Ghani",
+                "Consumer Phone Number": "03009998877",
+                "DUES": "15000",
                 "Call Status": "COMPLETED",
             },
         ),

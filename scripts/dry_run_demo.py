@@ -62,26 +62,28 @@ def _row(headers, values):
 
 
 def build_fixture_sheet(today: dt.date) -> InMemoryWorksheet:
+    """Fixture using GSM Brothers' real sheet column headers (app.schemas.ALL_SHEET_COLUMNS).
+
+    There's no dedicated Already Paid / Do Not Call column in the real
+    sheet -- DEMO-003 below is excluded via the Call Status text heuristic
+    (see app/schemas.py `_derive_already_paid`).
+    """
     headers = ALL_SHEET_COLUMNS
     rows = [
         _row(headers, {
-            "Consumer No": "DEMO-001", "Consumer Name": "Fatima Sheikh", "Father Name": "Anwar Sheikh",
-            "Mobile Number": "03211234567", "Address": "Block 4, Gulshan-e-Iqbal, Karachi",
-            "Outstanding Amount": "18500", "Current Bill": "3500", "Arrears": "15000",
-            "Due Date": today.isoformat(), "Tariff": "A1",
-            "Installment Eligible": "YES", "Installment Details": "3 installments of Rs. 6167",
-            "Scheme Available": "YES", "Scheme Description": "Standard K-Electric relief scheme",
-            "Status": "Active", "Already Paid": "NO", "Call Status": "PENDING", "Do Not Call": "NO",
+            "Consumer No.": "DEMO-001", "Name": "Fatima Sheikh",
+            "Consumer Phone Number": "03211234567", "Address": "Block 4, Gulshan-e-Iqbal, Karachi",
+            "DUES": "18500", "Rate Tariff": "A1",
+            "Scheme eligibility": "3 installments of Rs. 6167",
+            "Call Status": "PENDING",
         }),
         _row(headers, {
-            "Consumer No": "DEMO-002", "Consumer Name": "Kamran Ahmed", "Mobile Number": "03451112233",
-            "Outstanding Amount": "9000", "Due Date": today.isoformat(), "Call Status": "PENDING",
-            "Installment Eligible": "NO", "Do Not Call": "NO",
+            "Consumer No.": "DEMO-002", "Name": "Kamran Ahmed", "Consumer Phone Number": "03451112233",
+            "DUES": "9000", "Call Status": "PENDING",
         }),
         _row(headers, {
-            "Consumer No": "DEMO-003", "Consumer Name": "Rukhsana Bibi", "Mobile Number": "03001239876",
-            "Outstanding Amount": "5000", "Due Date": today.isoformat(), "Call Status": "PENDING",
-            "Already Paid": "YES",  # -> should be skipped
+            "Consumer No.": "DEMO-003", "Name": "Rukhsana Bibi", "Consumer Phone Number": "03001239876",
+            "DUES": "5000", "Call Status": "Already Paid",  # -> should be skipped
         }),
     ]
     return InMemoryWorksheet(headers, rows)
@@ -140,9 +142,9 @@ def main() -> None:
     headers = sheet_values[0]
     for row in sheet_values[1:]:
         row_map = dict(zip(headers, row))
-        if row_map.get("Consumer No") in {a.consumer_no for a in processed}:
-            print(f"  {row_map['Consumer No']}: Call Status={row_map.get('Call Status')!r} "
-                  f"Call Outcome={row_map.get('Call Outcome')!r} Transcript length={len(row_map.get('Transcript') or '')}")
+        if row_map.get("Consumer No.") in {a.consumer_no for a in processed}:
+            print(f"  {row_map['Consumer No.']}: Call Status={row_map.get('Call Status')!r} "
+                  f"Call out come={row_map.get('Call out come')!r} Transcript length={len(row_map.get('Transcript') or '')}")
 
     print("\n== Step 7: generate daily report from DB ==")
     report = compute_daily_report(session, today)

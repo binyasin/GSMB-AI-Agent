@@ -15,7 +15,7 @@ import logging
 from typing import Protocol
 
 from app.config import ConfigurationError, Settings, get_settings
-from app.schemas import ALL_SHEET_COLUMNS, REQUIRED_SHEET_COLUMNS, ConsumerRecord
+from app.schemas import ALL_SHEET_COLUMNS, CONSUMER_NO_COLUMN, REQUIRED_SHEET_COLUMNS, ConsumerRecord
 
 logger = logging.getLogger("calls")
 
@@ -113,12 +113,12 @@ class GoogleSheetRepository:
         records = []
         for raw_row in values[1:]:
             row = dict(zip(headers, raw_row + [""] * (len(headers) - len(raw_row))))
-            if not row.get("Consumer No", "").strip():
+            if not row.get(CONSUMER_NO_COLUMN, "").strip():
                 continue
             try:
                 records.append(ConsumerRecord.from_row(row))
             except Exception:
-                logger.exception("skipping unparsable sheet row for consumer_no=%s", row.get("Consumer No"))
+                logger.exception("skipping unparsable sheet row for consumer_no=%s", row.get(CONSUMER_NO_COLUMN))
         return records
 
     def find_row_number(self, consumer_no: str) -> int | None:
@@ -126,9 +126,9 @@ class GoogleSheetRepository:
         if not values:
             return None
         headers = [h.strip() for h in values[0]]
-        if "Consumer No" not in headers:
+        if CONSUMER_NO_COLUMN not in headers:
             return None
-        col_idx = headers.index("Consumer No")
+        col_idx = headers.index(CONSUMER_NO_COLUMN)
         for i, raw_row in enumerate(values[1:], start=2):
             if col_idx < len(raw_row) and raw_row[col_idx].strip() == consumer_no:
                 return i

@@ -253,22 +253,55 @@ service account created next.
 
 ## Sharing the Google Sheet
 
-1. Create a Google Sheet with (at minimum) these column headers in row 1 —
-   exact text, any order, extra columns are fine:
-   `Consumer No, Consumer Name, Mobile Number, Outstanding Amount, Due Date, Call Status, Last Call Date`
-   (the full recommended column set is documented at the top of
-   `app/schemas.py` — `ALL_SHEET_COLUMNS`).
+This project is built against GSM Brothers' **real, live sheet schema**
+(not a hypothetical one) — the exact column headers already in use:
+
+```
+SNo, Contract, Contract Account, Consumer No., Meter No., CD, MRU, Name,
+Address, Rate Tariff, DUE BCM, Total Due Units, Total Due Billing, LPD,
+LPA, DUES, Scheme eligibility, Consumer Phone Number, IBC, Recovery Amount,
+Remarks, Call Date, Call Time, Call Atempt, Call Status, Call out come,
+Transcript, Recording URL, Promise to Pay, Date, Agent Notes
+```
+(the authoritative list is `app.schemas.ALL_SHEET_COLUMNS`; header text
+must match exactly, including the real sheet's spelling of "Call Atempt").
+
+The **minimum required** columns (the app refuses to run without these,
+with a clear error naming exactly which is missing):
+`Consumer No., Name, Consumer Phone Number, DUES, Call Status, Call Date`
+
+Notable mapping decisions, made explicitly rather than guessed:
+- **DUES** is the figure spoken to consumers as their outstanding balance
+  — not "Total Due Billing" or "Recovery Amount", which are stored but
+  never spoken on a call.
+- There is **no dedicated Already Paid / Do Not Call / Human Follow-up
+  column**. These are derived from text in `Call Status` / `Call out come`
+  (e.g. a Call Status containing "Do Not Call" or "DNC", or a Call out come
+  of exactly `ALREADY_PAID`/`DO_NOT_CALL`) — see `app/schemas.py`
+  `_derive_already_paid` / `_derive_do_not_call` / `_derive_human_followup`.
+  **The local `do_not_call` database table remains the authoritative
+  compliance backstop** regardless of this text heuristic — once a
+  consumer is recorded there (spec Sec.31, enforced immediately when a
+  call ends with `do_not_call=true`), they are never queued again even if
+  a sheet edit reverts the Call Status text.
+- `CD`, `MRU`, `DUE BCM`, `LPD`, `LPA`, `IBC` are opaque K-Electric
+  reference codes — stored and passed through untouched; no call-script or
+  eligibility logic is built on their meaning.
+
+Steps:
+1. Confirm your sheet's row 1 has the headers above (any order, extra
+   columns are fine).
 2. Open the service account JSON file, copy the `client_email` value
    (looks like `gsm-recovery-agent@your-project.iam.gserviceaccount.com`).
 3. In the Google Sheet, click **Share** and add that email as an **Editor**.
 4. Copy the spreadsheet ID from its URL:
    `https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`
-5. Set `GOOGLE_SPREADSHEET_ID` and `GOOGLE_WORKSHEET_NAME` (the tab name,
-   default `Consumers`) in `.env`.
+5. Set `GOOGLE_SPREADSHEET_ID` and `GOOGLE_WORKSHEET_NAME` (the tab name)
+   in `.env`.
 
 The app never assumes column order — it looks up every field by header
 name (`app/google_sheets.py`), and refuses to run against a sheet missing
-any of the 7 required columns above (clear error, not a guess).
+any of the 6 required columns above (clear error, not a guess).
 
 ## Telephony provider setup
 
@@ -359,7 +392,8 @@ account:
 ```
 
 This prints every step (see the script's output for a worked example with
-three fixture consumers, one correctly excluded for `Already Paid=YES`).
+three fixture consumers, one correctly excluded via a `Call Status` of
+"Already Paid").
 
 ## Making a test call
 

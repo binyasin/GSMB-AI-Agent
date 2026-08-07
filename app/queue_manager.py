@@ -34,12 +34,22 @@ def sync_consumers_to_db(session: Session, records: list[ConsumerRecord]) -> Non
             existing[record.consumer_no] = consumer
 
         consumer.consumer_name = record.consumer_name
-        consumer.father_name = record.father_name
         consumer.mobile_number = record.mobile_number
         consumer.address = record.address
+        consumer.sno = record.sno
+        consumer.contract = record.contract
+        consumer.contract_account = record.contract_account
+        consumer.meter_no = record.meter_no
+        consumer.cd = record.cd
+        consumer.mru = record.mru
+        consumer.due_bcm = record.due_bcm
+        consumer.lpd = record.lpd
+        consumer.lpa = record.lpa
+        consumer.ibc = record.ibc
         consumer.outstanding_amount = record.outstanding_amount
-        consumer.current_bill = record.current_bill
-        consumer.arrears = record.arrears
+        consumer.total_due_units = record.total_due_units
+        consumer.total_due_billing = record.total_due_billing
+        consumer.recovery_amount = record.recovery_amount
         consumer.due_date = record.due_date
         consumer.tariff = record.tariff
         consumer.installment_eligible = record.installment_eligible
@@ -48,12 +58,12 @@ def sync_consumers_to_db(session: Session, records: list[ConsumerRecord]) -> Non
         consumer.scheme_description = record.scheme_description
         consumer.status = record.status
         consumer.already_paid = record.already_paid.value
+        consumer.promise_to_pay_flag = record.promise_to_pay_flag
         consumer.promise_to_pay_date = record.promise_to_pay_date
         consumer.remarks = record.remarks
         consumer.call_attempt = record.call_attempt
         consumer.call_status = record.call_status or consumer.call_status or "PENDING"
         consumer.call_outcome = record.call_outcome
-        consumer.call_duration = record.call_duration
         consumer.transcript = record.transcript
         consumer.recording_url = record.recording_url
         consumer.last_call_date = record.last_call_date
@@ -70,7 +80,7 @@ def _dnc_consumer_numbers(session: Session) -> set[str]:
 
 def skip_reason(consumer: Consumer, dnc_numbers: set[str], job_date: dt.date, session: Session, max_retries: int) -> str | None:
     """Return a human-readable skip reason, or None if the consumer is eligible."""
-    if consumer.already_paid == AlreadyPaidStatus.YES.value:
+    if consumer.already_paid != AlreadyPaidStatus.NO.value:
         return "ALREADY_PAID"
     if consumer.do_not_call or consumer.consumer_no in dnc_numbers:
         return "DO_NOT_CALL"

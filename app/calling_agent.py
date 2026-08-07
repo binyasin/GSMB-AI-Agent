@@ -43,12 +43,9 @@ def _consumer_to_record(consumer: Consumer) -> ConsumerRecord:
     return ConsumerRecord(
         consumer_no=consumer.consumer_no,
         consumer_name=consumer.consumer_name,
-        father_name=consumer.father_name,
         mobile_number=consumer.mobile_number,
         address=consumer.address,
         outstanding_amount=float(consumer.outstanding_amount) if consumer.outstanding_amount is not None else None,
-        current_bill=float(consumer.current_bill) if consumer.current_bill is not None else None,
-        arrears=float(consumer.arrears) if consumer.arrears is not None else None,
         due_date=consumer.due_date,
         tariff=consumer.tariff,
         installment_eligible=consumer.installment_eligible,
@@ -169,20 +166,41 @@ def finalize_call_attempt(
 
 
 def _build_sheet_updates(consumer: Consumer, attempt: CallAttempt) -> dict[str, str]:
+    """Maps DB state onto the real sheet's actual columns.
+
+    There is no dedicated Already Paid / Do Not Call / Human Follow-up
+    column (see app/schemas.py module docstring) — Call Status carries an
+    explicit "DO NOT CALL" marker when applicable (both for human
+    visibility and so `_derive_do_not_call` can re-detect it on a future
+    sheet read), and Remarks gets a bracketed summary of the flags that
+    would otherwise be invisible in the sheet. The local DoNotCall DB
+    registry remains the authoritative compliance mechanism regardless of
+    what ends up in these text fields.
+    """
+    call_status = consumer.call_status or ""
+    if consumer.do_not_call and "DO NOT CALL" not in call_status.upper():
+        call_status = "DO NOT CALL"
+
+    flag_notes = []
+    if consumer.already_paid and consumer.already_paid != "NO":
+        flag_notes.append(f"Already paid: {consumer.already_paid}")
+    if consumer.human_followup:
+        flag_notes.append("Human follow-up required")
+    remarks = consumer.remarks or ""
+    if flag_notes:
+        remarks = (remarks + " " if remarks else "") + "[" + "; ".join(flag_notes) + "]"
+
     return {
-        "Call Attempt": str(consumer.call_attempt or 0),
-        "Call Status": consumer.call_status or "",
-        "Call Outcome": consumer.call_outcome or "",
-        "Call Duration": str(consumer.call_duration or 0),
+        "Call Atempt": str(consumer.call_attempt or 0),
+        "Call Status": call_status,
+        "Call out come": consumer.call_outcome or "",
         "Transcript": consumer.transcript or "",
         "Recording URL": consumer.recording_url or "",
-        "Last Call Date": consumer.last_call_date.isoformat() if consumer.last_call_date else "",
-        "Last Call Time": consumer.last_call_time.strftime("%H:%M:%S") if consumer.last_call_time else "",
-        "Promise To Pay Date": consumer.promise_to_pay_date.isoformat() if consumer.promise_to_pay_date else "",
-        "Already Paid": consumer.already_paid or "NO",
-        "Human Follow-up": "YES" if consumer.human_followup else "NO",
-        "Do Not Call": "YES" if consumer.do_not_call else "NO",
-        "Remarks": consumer.remarks or "",
+        "Call Date": consumer.last_call_date.isoformat() if consumer.last_call_date else "",
+        "Call Time": consumer.last_call_time.strftime("%H:%M:%S") if consumer.last_call_time else "",
+        "Promise to Pay": "YES" if consumer.promise_to_pay_date else "",
+        "Date": consumer.promise_to_pay_date.isoformat() if consumer.promise_to_pay_date else "",
+        "Remarks": remarks,
         "Agent Notes": consumer.agent_notes or "",
     }
 

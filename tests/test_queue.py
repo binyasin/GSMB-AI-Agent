@@ -53,11 +53,10 @@ def test_zero_or_missing_outstanding_amount_not_eligible(db_session):
 
     headers = ALL_SHEET_COLUMNS
     row = [""] * len(headers)
-    row[headers.index("Consumer No")] = "CN-ZERO"
-    row[headers.index("Consumer Name")] = "Zero Due"
-    row[headers.index("Mobile Number")] = "03001112233"
-    row[headers.index("Outstanding Amount")] = "0"
-    row[headers.index("Due Date")] = "2026-08-15"
+    row[headers.index("Consumer No.")] = "CN-ZERO"
+    row[headers.index("Name")] = "Zero Due"
+    row[headers.index("Consumer Phone Number")] = "03001112233"
+    row[headers.index("DUES")] = "0"
     row[headers.index("Call Status")] = "PENDING"
     ws = FakeWorksheet(headers, [row])
     records = GoogleSheetRepository(ws).read_rows()

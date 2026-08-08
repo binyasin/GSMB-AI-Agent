@@ -152,6 +152,7 @@ class FakeTurnSession:
         self._finish_after = finish_after_n_chunks
         self._transcript = transcript
         self._done = threading.Event()
+        self.latest_transcript = ""
 
     def feed(self, chunk: bytes) -> None:
         self.fed.append(chunk)
@@ -203,3 +204,22 @@ async def test_process_turn_returns_none_on_stop_event():
     assert transcript is None
     assert session.closed is True
     assert session.fed == [b"chunk1"]
+
+
+@pytest.mark.anyio
+async def test_process_turn_falls_back_to_interim_transcript_on_timeout():
+    """Regression test: a live call (2026-08-08) confirmed 30+ seconds of
+    continuous, clearly-spoken audio with no pause long enough for Google's
+    endpointer to fire produced END_OF_SINGLE_UTTERANCE and got the whole
+    turn discarded once the outer timeout hit. session.latest_transcript
+    (populated from interim results) must be used instead of losing
+    everything the caller said."""
+    session = FakeTurnSession(finish_after_n_chunks=999)  # never finishes on its own
+    session.latest_transcript = "meri baat abhi sun rahe hain"
+    speech_client = FakeSpeechClient(session)
+    ws = FakeWebSocket([])  # no messages; the turn timeout should fire first
+
+    transcript = await _process_turn(ws, speech_client, SupportedLanguage.ENGLISH, timeout_seconds=0.05)
+
+    assert transcript == "meri baat abhi sun rahe hain"
+    assert session.closed is True

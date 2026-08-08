@@ -134,7 +134,9 @@ async def handle_turn_result(
     return engine.stage.value != "ENDED"
 
 
-async def _process_turn(websocket: WebSocket, speech_client, language: SupportedLanguage) -> str | None:
+async def _process_turn(
+    websocket: WebSocket, speech_client, language: SupportedLanguage, timeout_seconds: float = STT_TURN_TIMEOUT_SECONDS
+) -> str | None:
     """Runs one customer-utterance turn: opens a Google streaming session and
     feeds it 'media' frames as they arrive over the WebSocket, concurrently
     with waiting for that session to produce a transcript (Google signals
@@ -142,15 +144,39 @@ async def _process_turn(websocket: WebSocket, speech_client, language: Supported
 
     Returns the transcript (possibly "") once the turn completes, or None
     if the call ended (Twilio 'stop') before that happened.
+
+    If no natural end-of-utterance shows up within timeout_seconds -- a
+    caller who talks continuously with no pause long enough for Google's
+    endpointer to fire, confirmed happening on a live call (2026-08-08:
+    30+ seconds of real, clearly-spoken audio, zero transcript, because the
+    turn was cut off before END_OF_SINGLE_UTTERANCE ever arrived) -- this
+    falls back to session.latest_transcript (interim results) instead of
+    discarding everything the caller said.
     """
     session = speech_client.open_turn_session(language)
     transcript_task = asyncio.ensure_future(asyncio.to_thread(session.run))
     chunks_fed = 0
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_seconds
 
     try:
         while not transcript_task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "turn exceeded %.0fs with no end-of-utterance; falling back to interim transcript %r",
+                    timeout_seconds,
+                    session.latest_transcript,
+                )
+                transcript_task.cancel()
+                return session.latest_transcript
+
             receive_task = asyncio.ensure_future(websocket.receive_text())
-            done, pending = await asyncio.wait({transcript_task, receive_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait({transcript_task, receive_task}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+
+            if not done:
+                receive_task.cancel()
+                continue  # asyncio.wait's own timeout fired; loop re-checks remaining <= 0
 
             if receive_task not in done:
                 receive_task.cancel()
@@ -251,8 +277,12 @@ async def media_stream(websocket: WebSocket):
         while True:
             turn_number += 1
             logger.info("attempt=%s: turn %d: listening", attempt, turn_number)
+            # _process_turn now enforces STT_TURN_TIMEOUT_SECONDS itself and
+            # falls back to an interim transcript when it fires -- this
+            # outer wait_for is just a defense-in-depth backstop with slack,
+            # in case something inside it hangs past its own timeout logic.
             transcript = await asyncio.wait_for(
-                _process_turn(websocket, speech_client, engine.language), timeout=STT_TURN_TIMEOUT_SECONDS
+                _process_turn(websocket, speech_client, engine.language), timeout=STT_TURN_TIMEOUT_SECONDS + 10
             )
             logger.info("attempt=%s: turn %d: transcript=%r", attempt, turn_number, transcript)
             should_continue = await handle_turn_result(engine, transcript, speak)

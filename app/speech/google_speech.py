@@ -87,7 +87,12 @@ class GoogleSpeechClient:
                 language_code=language_code_for(language),
                 enable_automatic_punctuation=True,
             ),
-            interim_results=False,
+            # Interim (non-final) results let StreamingTurnSession track a
+            # "best transcript so far" that a caller can fall back to if the
+            # turn hits its outer timeout before a natural end-of-utterance
+            # -- otherwise a long, continuous reply with no clear pause gets
+            # discarded entirely (confirmed on a live call, 2026-08-08).
+            interim_results=True,
             # Without this, Google never emits END_OF_SINGLE_UTTERANCE, so
             # StreamingTurnSession.run()'s `for response in responses:` loop
             # has nothing to break on -- it just blocks past the point the
@@ -154,6 +159,15 @@ class StreamingTurnSession:
         self._config = streaming_config
         self._queue: queue.Queue = queue.Queue()
         self._closed = False
+        # Best transcript seen so far (interim or final), updated as results
+        # arrive. Readable by a caller that gives up on run() ever returning
+        # naturally (see media_stream.py's per-turn timeout) so a caller who
+        # talks continuously without a long enough pause for Google's
+        # endpointer to fire still gets *something* captured instead of the
+        # whole turn being silently discarded (confirmed happening on a live
+        # call, 2026-08-08: 30+ seconds of continuous real speech, zero
+        # transcript, because interim_results was off).
+        self.latest_transcript = ""
 
     def feed(self, chunk: bytes) -> None:
         if not self._closed:
@@ -195,8 +209,10 @@ class StreamingTurnSession:
             responses = self._speech_client.streaming_recognize(config=self._config, requests=self._requests())
             for response in responses:
                 for result in response.results:
-                    if result.is_final and result.alternatives:
-                        transcript = result.alternatives[0].transcript
+                    if result.alternatives:
+                        self.latest_transcript = result.alternatives[0].transcript
+                        if result.is_final:
+                            transcript = result.alternatives[0].transcript
                 if seen_end_of_utterance:
                     break
                 if response.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:

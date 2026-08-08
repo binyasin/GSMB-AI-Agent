@@ -83,18 +83,42 @@ def _render() -> None:  # pragma: no cover - Streamlit UI, exercised by manual r
 
         st.subheader("Controls")
         b1, b2, b3, b4, b5, b6, b7, b8 = st.columns(8)
+        dry_run_active = get_settings().dry_run
+
         if b1.button("START"):
-            set_campaign_status(session, CampaignStatus.RUNNING)
-            st.rerun()
+            if dry_run_active:
+                st.session_state["confirm_campaign_start"] = True
+            else:
+                set_campaign_status(session, CampaignStatus.RUNNING, actor="dashboard")
+                st.rerun()
         if b2.button("PAUSE"):
-            set_campaign_status(session, CampaignStatus.PAUSED)
+            set_campaign_status(session, CampaignStatus.PAUSED, actor="dashboard")
             st.rerun()
         if b3.button("RESUME"):
-            set_campaign_status(session, CampaignStatus.RUNNING)
-            st.rerun()
+            if dry_run_active:
+                st.session_state["confirm_campaign_start"] = True
+            else:
+                set_campaign_status(session, CampaignStatus.RUNNING, actor="dashboard")
+                st.rerun()
         if b4.button("STOP"):
-            set_campaign_status(session, CampaignStatus.STOPPED)
+            set_campaign_status(session, CampaignStatus.STOPPED, actor="dashboard")
             st.rerun()
+
+        if st.session_state.get("confirm_campaign_start"):
+            st.warning(
+                f"⚠️ DRY_RUN is enabled. Starting/resuming now will immediately begin simulating "
+                f"calls for all {data['consumers_remaining']} queued consumer(s) and write "
+                f"FABRICATED results (no real call happens) into your real Google Sheet — this is "
+                f"exactly what caused a prior incident affecting 30 real consumers. Are you sure?"
+            )
+            cc1, cc2 = st.columns(2)
+            if cc1.button("Yes, start anyway (DRY_RUN)", key="confirm_start_yes"):
+                set_campaign_status(session, CampaignStatus.RUNNING, actor="dashboard")
+                st.session_state["confirm_campaign_start"] = False
+                st.rerun()
+            if cc2.button("Cancel", key="confirm_start_cancel"):
+                st.session_state["confirm_campaign_start"] = False
+                st.rerun()
         if b5.button("RETRY FAILED"):
             settings = get_settings()
             jobs = (

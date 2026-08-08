@@ -33,3 +33,107 @@ def test_get_dashboard_data_shows_locked_consumer(db_session):
 
     data = get_dashboard_data(db_session)
     assert data["current_consumer_no"] == "CN-001"
+
+
+# ---------------------------------------------------------------------------
+# START/RESUME confirmation flow when DRY_RUN=true (spec-adjacent: this is
+# the exact mechanism that fabricated results for 30 real consumers in a
+# past incident -- a single accidental click on a dashboard button that
+# wrote directly to the DB with no confirmation and no audit trail).
+#
+# IMPORTANT: AppTest.from_file() re-executes dashboard.py's source directly
+# (like `python app/dashboard.py`), not via the already-imported
+# `app.dashboard` module object -- so patching attributes on that imported
+# module has NO effect on what AppTest runs (confirmed the hard way: an
+# earlier version of this test patched the wrong thing and silently hit the
+# real local database instead of the isolated fixture). What DOES work is
+# patching `app.database.SessionLocal`/`init_db` themselves, since
+# dashboard.py's fresh `from app.database import SessionLocal` (executed by
+# AppTest) resolves against that same already-imported `app.database`
+# module object, picking up whatever it currently holds.
+# ---------------------------------------------------------------------------
+def _run_dashboard(monkeypatch, db_session):
+    import app.database as database_module
+
+    monkeypatch.setattr(database_module, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(database_module, "init_db", lambda: None)
+    monkeypatch.setattr(db_session, "close", lambda: None)
+
+    from pathlib import Path
+
+    from streamlit.testing.v1 import AppTest
+
+    dashboard_path = Path(__file__).resolve().parent.parent / "app" / "dashboard.py"
+    at = AppTest.from_file(str(dashboard_path))
+    at.run(timeout=30)
+    assert not at.exception, [str(e) for e in at.exception]
+    return at
+
+
+def test_start_button_requires_confirmation_when_dry_run(monkeypatch, db_session):
+    from app.scheduler import get_campaign_status, set_campaign_status
+    from app.schemas import CampaignStatus
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    set_campaign_status(db_session, CampaignStatus.PAUSED, actor="test-setup")
+
+    at = _run_dashboard(monkeypatch, db_session)
+    at.button[0].click().run(timeout=30)  # b1 = START
+
+    assert get_campaign_status(db_session) == CampaignStatus.PAUSED  # unchanged -- awaiting confirmation
+    warning_text = " ".join(w.value for w in at.warning)
+    assert "DRY_RUN is enabled" in warning_text
+    assert "30 real consumers" in warning_text
+
+
+def test_start_button_confirmation_actually_starts_when_confirmed(monkeypatch, db_session):
+    from app.scheduler import get_campaign_status, set_campaign_status
+    from app.schemas import CampaignStatus
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    set_campaign_status(db_session, CampaignStatus.PAUSED, actor="test-setup")
+
+    at = _run_dashboard(monkeypatch, db_session)
+    at.button[0].click().run(timeout=30)  # START -> shows confirmation
+    at.button(key="confirm_start_yes").click().run(timeout=30)
+
+    assert get_campaign_status(db_session) == CampaignStatus.RUNNING
+
+
+def test_start_button_confirmation_cancel_leaves_status_unchanged(monkeypatch, db_session):
+    from app.scheduler import get_campaign_status, set_campaign_status
+    from app.schemas import CampaignStatus
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    set_campaign_status(db_session, CampaignStatus.PAUSED, actor="test-setup")
+
+    at = _run_dashboard(monkeypatch, db_session)
+    at.button[0].click().run(timeout=30)  # START -> shows confirmation
+    at.button(key="confirm_start_cancel").click().run(timeout=30)
+
+    assert get_campaign_status(db_session) == CampaignStatus.PAUSED
+
+
+def test_start_button_no_confirmation_needed_when_not_dry_run(monkeypatch, db_session):
+    from app.scheduler import get_campaign_status, set_campaign_status
+    from app.schemas import CampaignStatus
+
+    monkeypatch.setenv("DRY_RUN", "false")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    set_campaign_status(db_session, CampaignStatus.PAUSED, actor="test-setup")
+
+    at = _run_dashboard(monkeypatch, db_session)
+    at.button[0].click().run(timeout=30)  # START -- goes straight through, no DRY_RUN risk
+
+    assert get_campaign_status(db_session) == CampaignStatus.RUNNING

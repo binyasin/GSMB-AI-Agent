@@ -71,6 +71,37 @@ def test_campaign_status_defaults_to_running_and_persists(db_session):
     assert get_campaign_status(db_session) == CampaignStatus.RUNNING
 
 
+def test_set_campaign_status_records_audit_log_with_actor(db_session):
+    from app.models import AuditLog
+
+    set_campaign_status(db_session, CampaignStatus.RUNNING, actor="dashboard")
+    entries = db_session.query(AuditLog).filter_by(action="set_campaign_status").all()
+    assert len(entries) == 1
+    assert entries[0].actor == "dashboard"
+    assert '"new": "RUNNING"' in entries[0].details_json
+
+
+def test_set_campaign_status_audit_log_records_previous_value(db_session):
+    from app.models import AuditLog
+    import json
+
+    set_campaign_status(db_session, CampaignStatus.PAUSED, actor="api")
+    set_campaign_status(db_session, CampaignStatus.RUNNING, actor="api")
+    entries = db_session.query(AuditLog).filter_by(action="set_campaign_status").order_by(AuditLog.id).all()
+    assert len(entries) == 2
+    second = json.loads(entries[1].details_json)
+    assert second["previous"] == "PAUSED"
+    assert second["new"] == "RUNNING"
+
+
+def test_set_campaign_status_defaults_actor_to_unknown_when_unspecified(db_session):
+    from app.models import AuditLog
+
+    set_campaign_status(db_session, CampaignStatus.STOPPED)
+    entry = db_session.query(AuditLog).filter_by(action="set_campaign_status").one()
+    assert entry.actor == "unknown"
+
+
 def test_record_state_transition_only_logs_on_change(db_session):
     from app.models import DailySession
 

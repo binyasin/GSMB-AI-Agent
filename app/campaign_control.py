@@ -36,25 +36,25 @@ def require_control_token(x_control_token: str | None = Header(default=None)) ->
 
 @router.post("/start", dependencies=[Depends(require_control_token)])
 def start_campaign(session: Session = Depends(get_db)):
-    set_campaign_status(session, CampaignStatus.RUNNING)
+    set_campaign_status(session, CampaignStatus.RUNNING, actor="api")
     return {"campaign_status": CampaignStatus.RUNNING.value}
 
 
 @router.post("/pause", dependencies=[Depends(require_control_token)])
 def pause_campaign(session: Session = Depends(get_db)):
-    set_campaign_status(session, CampaignStatus.PAUSED)
+    set_campaign_status(session, CampaignStatus.PAUSED, actor="api")
     return {"campaign_status": CampaignStatus.PAUSED.value}
 
 
 @router.post("/resume", dependencies=[Depends(require_control_token)])
 def resume_campaign(session: Session = Depends(get_db)):
-    set_campaign_status(session, CampaignStatus.RUNNING)
+    set_campaign_status(session, CampaignStatus.RUNNING, actor="api")
     return {"campaign_status": CampaignStatus.RUNNING.value}
 
 
 @router.post("/stop", dependencies=[Depends(require_control_token)])
 def stop_campaign(session: Session = Depends(get_db)):
-    set_campaign_status(session, CampaignStatus.STOPPED)
+    set_campaign_status(session, CampaignStatus.STOPPED, actor="api")
     return {"campaign_status": CampaignStatus.STOPPED.value}
 
 

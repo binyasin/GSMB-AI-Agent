@@ -15,13 +15,14 @@ allowed it. A call is placed only when both agree.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import AgentSetting, CallJob, DailySession
+from app.models import AgentSetting, AuditLog, CallJob, DailySession
 from app.schemas import TERMINAL_STATES, CallState, CampaignStatus, SchedulerStatus
 
 logger = logging.getLogger("scheduler")
@@ -70,14 +71,32 @@ def get_campaign_status(session: Session) -> CampaignStatus:
         return CampaignStatus.RUNNING
 
 
-def set_campaign_status(session: Session, status: CampaignStatus) -> None:
+def set_campaign_status(session: Session, status: CampaignStatus, actor: str = "unknown") -> None:
+    """Change the operator-controlled campaign status.
+
+    `actor` identifies who/what made the change (e.g. "dashboard", "api",
+    "openclaw") and is always recorded to `audit_logs` -- there is
+    deliberately no silent path to changing this, since an unattributed
+    RUNNING flip while DRY_RUN=true is exactly what fabricates results for
+    real consumers (see the incident this was added to prevent).
+    """
     row = session.scalar(select(AgentSetting).where(AgentSetting.key == CAMPAIGN_STATUS_KEY))
+    previous = row.value if row is not None else None
     if row is None:
         row = AgentSetting(key=CAMPAIGN_STATUS_KEY, value=status.value)
         session.add(row)
     else:
         row.value = status.value
+
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="set_campaign_status",
+            details_json=json.dumps({"previous": previous, "new": status.value}),
+        )
+    )
     session.commit()
+    logger.info("campaign_status: %s -> %s (actor=%s)", previous, status.value, actor)
 
 
 # ---------------------------------------------------------------------------

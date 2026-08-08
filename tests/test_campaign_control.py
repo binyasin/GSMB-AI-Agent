@@ -36,6 +36,18 @@ def test_start_pause_resume_stop_transitions(db_session):
     assert client.post("/campaign/start").json()["campaign_status"] == "RUNNING"
 
 
+def test_campaign_control_endpoints_attribute_audit_log_to_api(db_session):
+    from app.models import AuditLog
+
+    app = _make_app(db_session)
+    client = TestClient(app)
+    client.post("/campaign/pause")
+
+    entries = db_session.query(AuditLog).filter_by(action="set_campaign_status").all()
+    assert len(entries) == 1
+    assert entries[0].actor == "api"
+
+
 def test_control_token_required_when_configured(db_session, monkeypatch):
     monkeypatch.setenv("CONTROL_API_TOKEN", "secret-token")
     from app.config import get_settings

@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
-from app.conversation_engine import ConversationEngine, no_speech_closing_line, no_speech_reprompt_line
+from app.conversation_engine import ConversationEngine, no_speech_closing_line
 from app.schemas import ConsumerRecord, SupportedLanguage
 
 logger = logging.getLogger("calls")
@@ -127,13 +127,15 @@ async def handle_turn_result(
     (already ended, conversation reached ENDED, or MAX_CONSECUTIVE_EMPTY_TURNS
     unrecognized turns happened in a row).
 
-    A live call (2026-08-08) confirmed that an unrecognized turn used to
-    stay completely silent and just listen again -- from the caller's side,
-    several turns of dead air (each up to STT_TURN_TIMEOUT_SECONDS long)
-    felt exactly like a frozen/dropped call, and they hung up. Now the agent
-    re-prompts on an unclear turn instead of going silent, and gives up
-    gracefully with a closing line after repeated silence instead of
-    looping re-prompts forever.
+    A live call (2026-08-08) originally confirmed that staying completely
+    silent on every unrecognized turn made the call feel dead and got hung
+    up on, so a re-prompt was added on every empty turn. A later live call
+    (same day, after the actual STT recognition bug behind most of those
+    empty turns was fixed) found hearing that same re-prompt line repeat
+    made the call feel like a recording rather than a live conversation --
+    explicit user feedback: stop re-prompting per turn. Kept: giving up
+    gracefully with a closing line after MAX_CONSECUTIVE_EMPTY_TURNS in a
+    row, so a call still can't loop in silence forever.
     """
     if transcript is None:
         return False, consecutive_empty_turns
@@ -142,7 +144,6 @@ async def handle_turn_result(
         if consecutive_empty_turns >= MAX_CONSECUTIVE_EMPTY_TURNS:
             await speak(no_speech_closing_line(engine.language))
             return False, consecutive_empty_turns
-        await speak(no_speech_reprompt_line(engine.language))
         return True, consecutive_empty_turns
     reply = engine.respond(transcript)
     if reply:

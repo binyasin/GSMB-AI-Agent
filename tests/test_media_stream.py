@@ -79,10 +79,16 @@ async def test_handle_turn_result_none_transcript_stops_loop():
 
 
 @pytest.mark.anyio
-async def test_handle_turn_result_empty_transcript_reprompts_and_keeps_listening():
-    """Regression test: a live call (2026-08-08) confirmed that staying
-    completely silent on an unrecognized turn -- just listening again with
-    no acknowledgement -- made the call feel dead and got hung up on."""
+async def test_handle_turn_result_empty_transcript_stays_silent_and_keeps_listening():
+    """Regression test (2026-08-08, in two parts): an unrecognized turn used
+    to stay completely silent, which felt like a dead call and got hung up
+    on -- a per-turn re-prompt was added to fix that. Once the actual STT
+    bug behind most of those empty turns was separately fixed, live-call
+    feedback was that hearing the same re-prompt line repeat felt like a
+    recording, not a live conversation -- so the per-turn re-prompt itself
+    was explicitly asked to be removed. What must still happen: the empty
+    counter keeps incrementing silently (test below covers the eventual
+    graceful give-up), just with no speech per turn."""
     engine = _engine()
     spoken = []
 
@@ -92,8 +98,7 @@ async def test_handle_turn_result_empty_transcript_reprompts_and_keeps_listening
     should_continue, empty_count = await handle_turn_result(engine, "   ", speak)
     assert should_continue is True
     assert empty_count == 1
-    assert len(spoken) == 1  # re-prompted instead of staying silent
-    assert "didn't catch" in spoken[0].lower()
+    assert spoken == []  # no per-turn re-prompt
 
 
 @pytest.mark.anyio

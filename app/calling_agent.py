@@ -162,7 +162,32 @@ def finalize_call_attempt(
     release_job_lock(session, job)
     session.commit()
 
+    log_event(
+        session, attempt.id, "CALL_COMPLETED",
+        {"consumer_no": consumer.consumer_no, "result": result_state.value, "intent": decision.intent.value, "duration_seconds": duration_seconds},
+        call_sid=attempt.provider_call_sid,
+    )
+    logger.info("CALL_COMPLETED attempt=%s consumer_no=%s result=%s intent=%s", attempt.attempt_uid, consumer.consumer_no, result_state.value, decision.intent.value)
+
     _sync_attempt_to_sheet(session, attempt, consumer, sheet_repo=sheet_repo)
+
+
+def _readable_transcript(transcript_json: str | None) -> str:
+    """Formats the stored turn-by-turn transcript JSON as readable
+    "Speaker: message" dialogue for the sheet's Transcript cell -- the raw
+    JSON (every field, every timestamp) is unreadable at a glance in a
+    spreadsheet. The DB's transcript_json is untouched by this; it stays
+    the structured source of truth used everywhere else."""
+    if not transcript_json:
+        return ""
+    try:
+        turns = json.loads(transcript_json)
+    except (ValueError, TypeError):
+        return transcript_json
+    if not isinstance(turns, list):
+        return transcript_json
+    lines = [f"{turn.get('speaker', '?')}: {turn.get('message', '')}" for turn in turns if isinstance(turn, dict)]
+    return "\n".join(lines)
 
 
 def _build_sheet_updates(consumer: Consumer, attempt: CallAttempt) -> dict[str, str]:
@@ -194,7 +219,7 @@ def _build_sheet_updates(consumer: Consumer, attempt: CallAttempt) -> dict[str, 
         "Call Atempt": str(consumer.call_attempt or 0),
         "Call Status": call_status,
         "Call out come": consumer.call_outcome or "",
-        "Transcript": consumer.transcript or "",
+        "Transcript": _readable_transcript(consumer.transcript),
         "Recording URL": consumer.recording_url or "",
         "Call Date": consumer.last_call_date.isoformat() if consumer.last_call_date else "",
         "Call Time": consumer.last_call_time.strftime("%H:%M:%S") if consumer.last_call_time else "",
@@ -207,6 +232,7 @@ def _build_sheet_updates(consumer: Consumer, attempt: CallAttempt) -> dict[str, 
 
 def _sync_attempt_to_sheet(session: Session, attempt: CallAttempt, consumer: Consumer, sheet_repo: GoogleSheetRepository | None = None) -> None:
     settings = get_settings()
+    logger.info("SHEET_SYNC_STARTED attempt=%s consumer_no=%s", attempt.attempt_uid, consumer.consumer_no)
     if sheet_repo is None:
         if not settings.has_google_credentials() or not settings.google_spreadsheet_id:
             attempt.sheet_synced = False
@@ -218,7 +244,7 @@ def _sync_attempt_to_sheet(session: Session, attempt: CallAttempt, consumer: Con
         try:
             sheet_repo = GoogleSheetRepository(open_worksheet(settings))
         except Exception as exc:  # pragma: no cover - requires live credentials
-            logger.warning("could not open worksheet for sync: %s", exc)
+            logger.warning("SHEET_SYNC_FAILED attempt=%s consumer_no=%s error=%s", attempt.attempt_uid, consumer.consumer_no, exc)
             attempt.sheet_synced = False
             attempt.sheet_sync_error = str(exc)
             session.commit()
@@ -228,8 +254,9 @@ def _sync_attempt_to_sheet(session: Session, attempt: CallAttempt, consumer: Con
         sheet_repo.update_row_by_consumer_no(consumer.consumer_no, _build_sheet_updates(consumer, attempt))
         attempt.sheet_synced = True
         attempt.sheet_sync_error = None
+        logger.info("SHEET_SYNC_SUCCESS attempt=%s consumer_no=%s", attempt.attempt_uid, consumer.consumer_no)
     except Exception as exc:  # noqa: BLE001 - never let a sheet failure lose the DB result
-        logger.warning("sheet sync failed for consumer_no=%s: %s", consumer.consumer_no, exc)
+        logger.warning("SHEET_SYNC_FAILED attempt=%s consumer_no=%s error=%s", attempt.attempt_uid, consumer.consumer_no, exc)
         attempt.sheet_synced = False
         attempt.sheet_sync_error = str(exc)
     session.commit()
@@ -340,12 +367,14 @@ def process_next_consumer(
     base_url = settings.public_base_url
     voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
     status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"
-    handle = telephony_provider.make_call(to_number, voice_url, status_url)
+    recording_url = f"{base_url}/webhooks/voice/recording?attempt={attempt.attempt_uid}"
+    handle = telephony_provider.make_call(to_number, voice_url, status_url, recording_url)
     attempt.provider_call_sid = handle.provider_call_sid
     attempt.result = CallState.RINGING.value
     job.state = CallState.RINGING.value
     session.commit()
     log_event(session, attempt.id, "call_placed", {"call_sid": handle.provider_call_sid}, call_sid=handle.provider_call_sid)
+    logger.info("CALL_STARTED attempt=%s consumer_no=%s call_sid=%s", attempt.attempt_uid, consumer.consumer_no, handle.provider_call_sid)
     return attempt
 
 
@@ -407,11 +436,13 @@ def run_test_call(session: Session, telephony_provider: TelephonyProvider | None
     base_url = settings.public_base_url
     voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
     status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"
-    handle = telephony_provider.make_call(settings.test_phone_number, voice_url, status_url)
+    recording_url = f"{base_url}/webhooks/voice/recording?attempt={attempt.attempt_uid}"
+    handle = telephony_provider.make_call(settings.test_phone_number, voice_url, status_url, recording_url)
     attempt.provider_call_sid = handle.provider_call_sid
     attempt.result = CallState.RINGING.value
     job.state = CallState.RINGING.value
     session.commit()
+    logger.info("CALL_STARTED attempt=%s consumer_no=%s call_sid=%s", attempt.attempt_uid, consumer.consumer_no, handle.provider_call_sid)
     return attempt
 
 

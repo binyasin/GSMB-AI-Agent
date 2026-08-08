@@ -54,7 +54,17 @@ class TwilioProvider(TelephonyProvider):
         self.client = Client(self.settings.twilio_account_sid, self.settings.twilio_auth_token)
         self._validator = RequestValidator(self.settings.twilio_auth_token)
 
-    def make_call(self, to_number: str, voice_webhook_url: str, status_webhook_url: str) -> CallHandle:
+    def make_call(
+        self, to_number: str, voice_webhook_url: str, status_webhook_url: str, recording_webhook_url: str | None = None
+    ) -> CallHandle:
+        kwargs = {}
+        if self.settings.call_recording_enabled and recording_webhook_url:
+            # Recordings finish processing asynchronously, after the call itself
+            # has ended -- Twilio calls this URL once one is actually ready,
+            # rather than us having to poll for it (see /webhooks/voice/recording).
+            kwargs["recording_status_callback"] = recording_webhook_url
+            kwargs["recording_status_callback_event"] = ["completed"]
+
         call = self.client.calls.create(
             to=to_number,
             from_=self.settings.twilio_phone_number,
@@ -62,8 +72,9 @@ class TwilioProvider(TelephonyProvider):
             status_callback=status_webhook_url,
             status_callback_event=["initiated", "ringing", "answered", "completed"],
             record=self.settings.call_recording_enabled,
+            **kwargs,
         )
-        logger.info("twilio call created sid=%s to=%s", call.sid, to_number)
+        logger.info("twilio call created sid=%s to=%s recording_enabled=%s", call.sid, to_number, self.settings.call_recording_enabled)
         return CallHandle(provider_call_sid=call.sid, status=call.status)
 
     def hangup(self, call_sid: str) -> None:

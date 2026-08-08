@@ -5,6 +5,7 @@ import datetime as dt
 import pytest
 
 from app.calling_agent import (
+    _readable_transcript,
     acquire_job_lock,
     finalize_call_attempt,
     process_next_consumer,
@@ -237,3 +238,27 @@ def test_clear_daily_records_only_affects_the_given_day(db_session):
 
     other_job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=other_day).one()
     assert other_job is not None  # untouched, different job_date
+
+
+# ---------------------------------------------------------------------------
+# _readable_transcript: human-readable dialogue for the sheet's Transcript
+# column (the DB's transcript_json stays the untouched structured source of
+# truth -- this only affects what gets written to the spreadsheet cell).
+# ---------------------------------------------------------------------------
+def test_readable_transcript_formats_turns_as_dialogue():
+    import json as _json
+
+    transcript_json = _json.dumps(
+        [
+            {"speaker": "Agent", "timestamp": "2026-08-08T10:00:00Z", "message": "Assalam-o-Alaikum"},
+            {"speaker": "Customer", "timestamp": "2026-08-08T10:00:05Z", "message": "Ji, main hi hoon"},
+        ]
+    )
+    assert _readable_transcript(transcript_json) == "Agent: Assalam-o-Alaikum\nCustomer: Ji, main hi hoon"
+
+
+def test_readable_transcript_handles_empty_and_malformed_input():
+    assert _readable_transcript(None) == ""
+    assert _readable_transcript("") == ""
+    assert _readable_transcript("not valid json") == "not valid json"
+    assert _readable_transcript("[]") == ""

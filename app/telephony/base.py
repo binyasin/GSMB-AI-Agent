@@ -21,9 +21,14 @@ class TelephonyProvider(ABC):
     """Abstract outbound-call provider."""
 
     @abstractmethod
-    def make_call(self, to_number: str, voice_webhook_url: str, status_webhook_url: str) -> CallHandle:
+    def make_call(
+        self, to_number: str, voice_webhook_url: str, status_webhook_url: str, recording_webhook_url: str | None = None
+    ) -> CallHandle:
         """Place an outbound call. Returns immediately with the provider's call SID;
-        the call's actual progress arrives via status webhooks."""
+        the call's actual progress arrives via status webhooks. recording_webhook_url,
+        if given, is where the provider notifies once a recording (if enabled) has
+        finished processing -- recordings become available asynchronously, after the
+        call itself has ended, so this is a separate notification from status_webhook_url."""
 
     @abstractmethod
     def hangup(self, call_sid: str) -> None:

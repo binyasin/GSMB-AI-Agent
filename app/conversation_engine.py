@@ -629,6 +629,12 @@ class ConversationEngine:
         else:
             line = ""
 
+        logger.info(
+            "INTENT_CLASSIFIED consumer_no=%s intent=%s secondary_intent=%s angry=%s",
+            self.consumer.consumer_no, self.decision.intent.value,
+            self.decision.secondary_intent.value if self.decision.secondary_intent else None,
+            self.decision.customer_angry,
+        )
         self._log("Agent", line)
         return line
 

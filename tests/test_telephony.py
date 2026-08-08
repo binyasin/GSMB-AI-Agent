@@ -47,3 +47,57 @@ def test_twilio_provider_verifies_genuine_webhook_signature():
 
     tampered_params = {**params, "CallStatus": "failed"}
     assert provider.verify_webhook_signature(url, tampered_params, genuine_signature) is False
+
+
+def _provider(mocker, call_recording_enabled: bool) -> TwilioProvider:
+    settings = Settings(
+        telephony_provider="twilio",
+        twilio_account_sid="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        twilio_auth_token="fake_auth_token_for_offline_signature_test",
+        twilio_phone_number="+15005550006",
+        public_base_url="https://example.com",
+        call_recording_enabled=call_recording_enabled,
+    )
+    mocker.patch("app.telephony.twilio_provider.Client")
+    provider = TwilioProvider(settings)
+    provider.client.calls.create.return_value = mocker.MagicMock(sid="CA123", status="queued")
+    return provider
+
+
+def test_make_call_passes_recording_callback_when_enabled(mocker):
+    """Regression test: make_call previously set record=True but never told
+    Twilio where to send the recording-ready notification, so
+    /webhooks/voice/recording could never fire even with recording on."""
+    provider = _provider(mocker, call_recording_enabled=True)
+
+    provider.make_call(
+        "+923001234567", "https://example.com/incoming", "https://example.com/status",
+        recording_webhook_url="https://example.com/recording",
+    )
+
+    _, kwargs = provider.client.calls.create.call_args
+    assert kwargs["record"] is True
+    assert kwargs["recording_status_callback"] == "https://example.com/recording"
+    assert kwargs["recording_status_callback_event"] == ["completed"]
+
+
+def test_make_call_omits_recording_callback_when_disabled(mocker):
+    provider = _provider(mocker, call_recording_enabled=False)
+
+    provider.make_call(
+        "+923001234567", "https://example.com/incoming", "https://example.com/status",
+        recording_webhook_url="https://example.com/recording",
+    )
+
+    _, kwargs = provider.client.calls.create.call_args
+    assert kwargs["record"] is False
+    assert "recording_status_callback" not in kwargs
+
+
+def test_make_call_omits_recording_callback_when_url_not_given(mocker):
+    provider = _provider(mocker, call_recording_enabled=True)
+
+    provider.make_call("+923001234567", "https://example.com/incoming", "https://example.com/status")
+
+    _, kwargs = provider.client.calls.create.call_args
+    assert "recording_status_callback" not in kwargs

@@ -160,6 +160,40 @@ def test_recording_webhook_sets_recording_url(db_session, monkeypatch):
     assert attempt.recording_url == "https://api.twilio.com/recordings/RE123"
 
 
+def test_recording_webhook_resyncs_sheet_with_the_new_url(db_session, monkeypatch):
+    """Regression test: recordings finish processing asynchronously, after
+    the call's own finalize_call_attempt sheet sync already ran -- the
+    /recording webhook used to save recording_url to the DB but never push
+    it to the sheet, so the sheet's Recording URL column stayed empty
+    forever even though the DB had the real value."""
+    attempt = _seed_attempt(db_session)
+    app = _make_app(db_session, monkeypatch)
+    client = TestClient(app)
+
+    monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", '{"fake": "credentials"}')
+    monkeypatch.setenv("GOOGLE_SPREADSHEET_ID", "fake-spreadsheet-id")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sheet = make_sample_worksheet()
+    monkeypatch.setattr("app.google_sheets.open_worksheet", lambda settings: sheet)
+
+    resp = _signed_post(
+        client,
+        f"/webhooks/voice/recording?attempt={attempt.attempt_uid}",
+        {"CallSid": "CA1", "RecordingUrl": "https://api.twilio.com/recordings/RE123"},
+    )
+    assert resp.status_code == 204
+
+    db_session.refresh(attempt)
+    assert attempt.sheet_synced is True
+    all_values = sheet.get_all_values()
+    headers = all_values[0]
+    row = all_values[1]  # CN-001 is the first data row in the fixture sheet
+    assert row[headers.index("Recording URL")] == "https://api.twilio.com/recordings/RE123"
+
+
 def test_transcription_webhook_logs_without_error(db_session, monkeypatch):
     attempt = _seed_attempt(db_session)
     app = _make_app(db_session, monkeypatch)

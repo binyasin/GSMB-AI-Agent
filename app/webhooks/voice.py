@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
-from app.calling_agent import finalize_call_attempt, log_event
+from app.calling_agent import _sync_attempt_to_sheet, finalize_call_attempt, log_event
 from app.config import ConfigurationError, get_settings
 from app.database import get_db
 from app.models import CallAttempt, CallJob, Consumer
@@ -111,6 +111,9 @@ async def status(
         job = session.get(CallJob, call_attempt.call_job_id)
         job.state = mapped_state.value
         session.commit()
+        tag = {"ringing": "CALL_RINGING", "answered": "CALL_ANSWERED", "in-progress": "CALL_ANSWERED"}.get(call_status)
+        if tag:
+            logger.info("%s attempt=%s call_sid=%s", tag, attempt, call_sid)
         return Response(status_code=204)
 
     # Terminal status without the bridge having finalized (no answer, busy,
@@ -148,6 +151,13 @@ async def recording(
         consumer = session.get(Consumer, session.get(CallJob, call_attempt.call_job_id).consumer_id)
         consumer.recording_url = recording_url
         session.commit()
+        # Recordings finish processing asynchronously, after the call (and
+        # its own finalize_call_attempt sheet sync) has already completed --
+        # without re-syncing here, the sheet's Recording URL column stays
+        # empty forever even though the DB has it.
+        logger.info("RECORDING_AVAILABLE attempt=%s call_sid=%s url=%s", attempt, call_attempt.provider_call_sid, recording_url)
+        _sync_attempt_to_sheet(session, call_attempt, consumer)
+        logger.info("RECORDING_SAVED attempt=%s call_sid=%s", attempt, call_attempt.provider_call_sid)
     log_event(session, call_attempt.id, "recording_webhook", params)
     return Response(status_code=204)
 

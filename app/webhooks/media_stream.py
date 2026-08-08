@@ -268,6 +268,7 @@ async def media_stream(websocket: WebSocket):
         logger.error("no registered ConversationEngine for attempt=%s; closing stream", attempt)
         await websocket.close(code=1011)
         return
+    logger.info("AI_SESSION_STARTED attempt=%s", attempt)
 
     # A hung Google API call here (TTS or STT) previously failed *silently*
     # forever -- no exception, no log line, just a dead call until Twilio's
@@ -282,13 +283,14 @@ async def media_stream(websocket: WebSocket):
             _synthesize_and_send(websocket, speech_client, greeting, engine.language, state.stream_sid),
             timeout=TTS_TIMEOUT_SECONDS,
         )
-        logger.info("attempt=%s: greeting sent, entering conversation loop", attempt)
+        logger.info("AI_GREETING_SENT attempt=%s", attempt)
 
         async def speak(text: str) -> None:
             await asyncio.wait_for(
                 _synthesize_and_send(websocket, speech_client, text, engine.language, state.stream_sid),
                 timeout=TTS_TIMEOUT_SECONDS,
             )
+            logger.info("AI_RESPONSE_SENT attempt=%s", attempt)
 
         turn_number = 0
         consecutive_empty_turns = 0
@@ -302,6 +304,8 @@ async def media_stream(websocket: WebSocket):
             transcript = await asyncio.wait_for(
                 _process_turn(websocket, speech_client, engine.language), timeout=STT_TURN_TIMEOUT_SECONDS + 10
             )
+            if transcript:
+                logger.info("CONSUMER_RESPONSE_RECEIVED attempt=%s turn=%d transcript=%r", attempt, turn_number, transcript)
             logger.info("attempt=%s: turn %d: transcript=%r", attempt, turn_number, transcript)
             should_continue, consecutive_empty_turns = await handle_turn_result(
                 engine, transcript, speak, consecutive_empty_turns

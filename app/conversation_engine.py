@@ -159,9 +159,15 @@ def already_paid_line(language: SupportedLanguage) -> str:
     return "Thank you. Our representative can verify the payment record."
 
 
+def already_paid_receipt_question_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Kya aap ke paas payment receipt ya transaction reference maujood hai?"
+    return "Do you have the payment receipt or transaction reference available?"
+
+
 def dispute_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
-        return "Samajh gaya/gayi. Hum ye maamla hamare numainde ke through follow-up ke liye bhej rahe hain."
+        return "Samajh gayi. Hum ye maamla hamare numainde ke through follow-up ke liye bhej rahe hain."
     return "Understood. We'll route this to a representative for follow-up."
 
 
@@ -177,6 +183,107 @@ def installment_request_line(language: SupportedLanguage) -> str:
     return "Understood — we'll forward your installment request to a representative who will follow up with you."
 
 
+def refuses_to_pay_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return (
+            "Samajh gayi. Balkeh, outstanding amount aap ke electricity account par dikha raha hai. "
+            "Agar aap samajhte hain ke amount ghalat hai ya bill mein koi masla hai, to aap KE customer service "
+            "ke through review karwa sakte hain. Agar koi dispute nahin hai to hum request karte hain ke "
+            "outstanding amount clear kar dein takay aage koi masla na ho."
+        )
+    return (
+        "I understand your concern. However, the outstanding amount is showing against the electricity account. "
+        "If you believe the amount is incorrect or there is an issue with the bill, you may have it reviewed "
+        "through the appropriate KE customer service channel. If there is no billing dispute, we kindly request "
+        "you to clear the outstanding amount to avoid further issues."
+    )
+
+
+def refuses_to_pay_followup_question_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Kya aap billing issue review karwana chahenge, ya hum payment expect kar sakte hain?"
+    return "Would you like to have the billing issue reviewed, or can we expect payment?"
+
+
+def not_my_account_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return (
+            "Takleef ke liye maazrat. Aisa lagta hai ke account ki maloomat verify honi chahiye. Agar ye account "
+            "aap ka nahin hai to barah-e-karam koi payment na karein. Hum tajweez karte hain ke aap KE customer "
+            "service se consumer/account details verify karwa lein takay record theek kiya ja sake agar zaroorat ho."
+        )
+    return (
+        "I apologize for the inconvenience. It appears that the account information may need verification. "
+        "Please do not make any payment if the account does not belong to you. We recommend verifying the "
+        "consumer/account details with KE customer service so the record can be corrected if necessary."
+    )
+
+
+def not_my_account_followup_question_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Kya aap account details verify karwana chahenge?"
+    return "Would you like to verify the account details?"
+
+
+def not_my_address_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return (
+            "Batane ka shukriya. Is soorat mein, account ki maloomat update ya verify honi chahiye. Barah-e-karam "
+            "KE customer service se raabta karke occupancy ya address ki tabdeeli report karein aur account "
+            "details check karwa lein."
+        )
+    return (
+        "Thank you for informing me. In that case, the account information may need to be updated or verified. "
+        "Please contact KE customer service to report the change of occupancy or address and have the account "
+        "details checked."
+    )
+
+
+def anything_else_question_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Kya is account ke bare mein aap kuch aur batana chahenge?"
+    return "Is there anything else regarding this account that you would like us to note?"
+
+
+def complaint_not_addressed_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return (
+            "Aap ka concern samajhti hoon, aur maazrat ke aap ki request abhi tak resolve nahin hui. "
+            "Main note kar rahi/raha hoon ke request pending hai. Barah-e-karam apna complaint ya reference "
+            "number available rakhein takay is maamle ko appropriate KE support channel ke through follow-up "
+            "kiya ja sake."
+        )
+    return (
+        "I understand your concern, and I apologize that your request has not yet been resolved. I will note "
+        "your concern that the request is still pending. Please keep your complaint or reference number "
+        "available so the matter can be followed up through the appropriate KE support channel."
+    )
+
+
+def complaint_reference_question_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Kya aap ke paas complaint ya request number maujood hai?"
+    return "Do you have your complaint or request number?"
+
+
+def customer_question_fallback_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return (
+            "Aap ka sawal samajhti hoon. Main aap ko ghalat maloomat nahin dena chahti. "
+            "Barah-e-karam tasdeeq aur mazeed madad ke liye KE customer service se raabta karein."
+        )
+    return (
+        "I understand your question. I don't want to provide you with incorrect information. Please contact "
+        "KE customer service for verification and further assistance."
+    )
+
+
+def angry_acknowledgment_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Main samajhti hoon ke aap pareshan hain, aur is takleef ke liye maazrat khwahish karti hoon."
+    return "I understand that you are upset, and I apologize for the inconvenience."
+
+
 def closing_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
         return "Waqt dene ka shukriya. Aap ke cooperation ka shukriya. Allah Hafiz."
@@ -188,6 +295,25 @@ _CLOSING_BY_INTENT = {
     CustomerIntent.DISPUTE: dispute_line,
     CustomerIntent.HUMAN_ASSISTANCE: human_assistance_line,
     CustomerIntent.INSTALLMENT_REQUEST: installment_request_line,
+    CustomerIntent.REFUSES_TO_PAY: refuses_to_pay_line,
+    CustomerIntent.NOT_MY_ACCOUNT: not_my_account_line,
+    CustomerIntent.NOT_MY_ADDRESS: not_my_address_line,
+    CustomerIntent.COMPLAINT_NOT_ADDRESSED: complaint_not_addressed_line,
+}
+
+# Intents that must ask a follow-up question and LISTEN before closing,
+# instead of disconnecting right after the acknowledgment line (the core
+# rule from the user's calling-behavior spec: "NEVER disconnect immediately
+# after saying the consumer's name" / immediately after any single response).
+_FOLLOWUP_QUESTION_BY_INTENT = {
+    CustomerIntent.ALREADY_PAID: already_paid_receipt_question_line,
+    CustomerIntent.DISPUTE: anything_else_question_line,
+    CustomerIntent.HUMAN_ASSISTANCE: anything_else_question_line,
+    CustomerIntent.INSTALLMENT_REQUEST: anything_else_question_line,
+    CustomerIntent.REFUSES_TO_PAY: refuses_to_pay_followup_question_line,
+    CustomerIntent.NOT_MY_ACCOUNT: not_my_account_followup_question_line,
+    CustomerIntent.NOT_MY_ADDRESS: anything_else_question_line,
+    CustomerIntent.COMPLAINT_NOT_ADDRESSED: complaint_reference_question_line,
 }
 
 
@@ -195,6 +321,16 @@ def closing_line_for_intent(decision: CallDecision, language: SupportedLanguage)
     special = _CLOSING_BY_INTENT.get(decision.intent)
     prefix = special(language) + " " if special else ""
     return prefix + closing_line(language)
+
+
+def secondary_intent_line(decision: CallDecision, language: SupportedLanguage) -> str | None:
+    """Best-effort second-concern acknowledgment (LLM path only -- the
+    offline keyword fallback never sets secondary_intent, since it's pattern
+    matching on one utterance, not real multi-concern NLU)."""
+    if decision.secondary_intent is None:
+        return None
+    special = _CLOSING_BY_INTENT.get(decision.secondary_intent)
+    return special(language) if special else None
 
 
 def no_speech_closing_line(language: SupportedLanguage) -> str:
@@ -213,11 +349,23 @@ class ClassificationStage(StrEnum):
     VERIFY_IDENTITY = "VERIFY_IDENTITY"
     MAIN_RESPONSE = "MAIN_RESPONSE"
     PROMISE_DATE = "PROMISE_DATE"
+    FOLLOWUP = "FOLLOWUP"
 
 
 _SYSTEM_PROMPT_TEMPLATE = """You are the NLU component of an AI recovery-calling agent for GSM Brothers, \
 calling on behalf of K-Electric about an outstanding consumer bill. You are given ONE customer utterance \
 (already transcribed) plus the conversation stage. Classify it using the classify_customer_response tool.
+
+Understand meaning, not just exact words -- for example:
+- "I've cleared it already" -> ALREADY_PAID
+- "That's somebody else's meter" -> NOT_MY_ACCOUNT
+- "I don't live there anymore" -> NOT_MY_ADDRESS
+- "Nobody has solved my complaint" -> COMPLAINT_NOT_ADDRESSED
+- "I'll arrange the money" -> PROMISE_TO_PAY
+- "I can't afford it at the moment" -> NEEDS_MORE_TIME
+- "Why are you calling me?" -> CUSTOMER_QUESTION
+- "I don't pay" / "I won't pay this bill" -> REFUSES_TO_PAY (distinct from DISPUTE: REFUSES_TO_PAY is an outright
+  refusal with no stated reason; DISPUTE is specifically "the amount/bill is wrong")
 
 Rules:
 - Do NOT invent, calculate, or assume any amount, date, or scheme detail. Only extract what the customer \
@@ -226,8 +374,13 @@ explicitly said.
 ("tomorrow", "next Friday"). If they were vague ("soon", "jald hi"), leave promise_to_pay_date null and put \
 their own words in `notes` instead.
 - Set human_followup=true for: disputes, installment requests, "already paid" claims, requests for a human, \
-or anything you are not confident about.
+NOT_MY_ACCOUNT, NOT_MY_ADDRESS, COMPLAINT_NOT_ADDRESSED, or anything you are not confident about.
 - Set do_not_call=true only if the customer explicitly asked not to be called again.
+- If the utterance raises a second, genuinely distinct concern alongside the primary one (e.g. "I already paid \
+AND my complaint hasn't been resolved"), set secondary_intent to that second concern's category. Only use this \
+for a real second concern, not a restatement of the same one.
+- Set customer_angry=true if the tone is hostile, frustrated, or raised -- independent of which category the \
+content falls into.
 - Current conversation stage: {stage}
 """
 
@@ -356,9 +509,21 @@ def keyword_fallback_classifier(
 
     if any(p in text for p in ("already paid", "maine pay kar", "pay kar diya")):
         return CallDecision(intent=CustomerIntent.ALREADY_PAID, human_followup=True)
+    _not_my_account_phrases = ("not my account", "not my meter", "someone else's meter", "somebody else's meter", "mera account nahi", "ye mera meter nahi", "mera meter nahi")
+    if any(p in text for p in _not_my_account_phrases):
+        return CallDecision(intent=CustomerIntent.NOT_MY_ACCOUNT, human_followup=True)
+    _not_my_address_phrases = ("not my house", "not my address", "don't live there", "dont live there", "i've moved", "i have moved", "mera ghar nahi", "yahan nahi rehta", "yahan nahi rehti")
+    if any(p in text for p in _not_my_address_phrases):
+        return CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True)
+    _complaint_phrases = ("complaint", "not resolved", "not addressed", "shikayat", "meri complaint", "request pending")
+    if any(p in text for p in _complaint_phrases):
+        return CallDecision(intent=CustomerIntent.COMPLAINT_NOT_ADDRESSED, human_followup=True)
     _dispute_phrases = ("dispute", "wrong amount", "not correct", "galat bill", "sahi nahi", "galat hai")
     if any(p in text for p in _dispute_phrases) or ("galat" in text and any(p in text for p in ("bill", "amount", "hisab"))):
         return CallDecision(intent=CustomerIntent.DISPUTE, human_followup=True)
+    _refuses_phrases = ("i don't pay", "i dont pay", "won't pay", "wont pay", "not going to pay", "will not pay", "nahi doon ga", "nahi dena", "nahi de sakta")
+    if any(p in text for p in _refuses_phrases):
+        return CallDecision(intent=CustomerIntent.REFUSES_TO_PAY, human_followup=True)
     if any(p in text for p in ("installment", "qist", "scheme")):
         return CallDecision(intent=CustomerIntent.INSTALLMENT_REQUEST, human_followup=True)
     if any(p in text for p in ("human", "representative", "agent", "insaan")):
@@ -367,6 +532,10 @@ def keyword_fallback_classifier(
         return CallDecision(intent=CustomerIntent.NOT_INTERESTED)
     if any(p in text for p in ("call back", "callback", "baad mein call")):
         return CallDecision(intent=CustomerIntent.CALL_BACK, human_followup=True)
+
+    _cannot_pay_phrases = ("can't pay", "cant pay", "cannot pay", "no money", "don't have money", "dont have money", "paisay nahi", "abhi nahi", "need time", "waqt chahiye")
+    if any(p in text for p in _cannot_pay_phrases):
+        return CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True, notes=utterance)
 
     if any(p in text for p in ("pay", "adaigi", "ada kar")):
         if stage == ClassificationStage.PROMISE_DATE:
@@ -383,6 +552,10 @@ def keyword_fallback_classifier(
             return CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, notes=utterance)
         return CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=None)
 
+    _question_starters = ("why ", "what ", "how ", "kyun ", "kya ", "kaise ")
+    if "?" in utterance or any(text.startswith(p) for p in _question_starters):
+        return CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True, notes=utterance)
+
     return CallDecision(intent=CustomerIntent.OTHER, human_followup=True, notes=utterance)
 
 
@@ -394,6 +567,7 @@ class ConversationStage(StrEnum):
     AWAITING_IDENTITY_REPLY = "AWAITING_IDENTITY_REPLY"
     AWAITING_MAIN_RESPONSE = "AWAITING_MAIN_RESPONSE"
     AWAITING_PROMISE_DATE = "AWAITING_PROMISE_DATE"
+    AWAITING_FOLLOWUP = "AWAITING_FOLLOWUP"
     ENDED = "ENDED"
 
 
@@ -416,6 +590,7 @@ class ConversationEngine:
         self.transcript: list[TranscriptTurn] = []
         self.decision = CallDecision(intent=CustomerIntent.OTHER)
         self._classifier = classifier or self._default_classifier()
+        self._pending_followup_intent: CustomerIntent | None = None
 
     @staticmethod
     def _default_classifier():
@@ -449,6 +624,8 @@ class ConversationEngine:
             line = self._handle_main_response(utterance)
         elif self.stage == ConversationStage.AWAITING_PROMISE_DATE:
             line = self._handle_promise_date(utterance)
+        elif self.stage == ConversationStage.AWAITING_FOLLOWUP:
+            line = self._handle_followup(utterance)
         else:
             line = ""
 
@@ -478,6 +655,15 @@ class ConversationEngine:
         self.stage = ConversationStage.AWAITING_MAIN_RESPONSE
         return " ".join(lines)
 
+    def _apply_tone(self, line: str, decision: CallDecision) -> str:
+        """Prepends an empathetic acknowledgment when the customer's tone
+        was flagged as angry/frustrated -- independent of which category
+        the content itself falls into (spec Category I: never argue, stay
+        calm and respectful, regardless of the actual issue)."""
+        if decision.customer_angry:
+            return angry_acknowledgment_line(self.language) + " " + line
+        return line
+
     def _handle_main_response(self, utterance: str) -> str:
         decision = self._classifier(ClassificationStage.MAIN_RESPONSE, self.consumer, utterance, self.transcript)
         decision = decision.model_copy(update={"verification_passed": self.decision.verification_passed})
@@ -487,12 +673,42 @@ class ConversationEngine:
             self.stage = ConversationStage.ENDED
             return dnc_ack_line(self.language)
 
+        # Never disconnect on a question -- answer (or say we can't) and keep
+        # listening in the same stage, per spec Category H / the end-of-call
+        # rule ("only disconnect once the question has been addressed").
+        if decision.intent == CustomerIntent.CUSTOMER_QUESTION:
+            parts = []
+            secondary = secondary_intent_line(decision, self.language)
+            if secondary:
+                parts.append(secondary)
+            parts.append(customer_question_fallback_line(self.language))
+            return self._apply_tone(" ".join(parts), decision)
+
         if decision.intent == CustomerIntent.PROMISE_TO_PAY and decision.promise_to_pay_date is None:
             self.stage = ConversationStage.AWAITING_PROMISE_DATE
-            return promise_date_question_line(self.language)
+            return self._apply_tone(promise_date_question_line(self.language), decision)
+
+        followup_question = _FOLLOWUP_QUESTION_BY_INTENT.get(decision.intent)
+        if followup_question is not None:
+            self._pending_followup_intent = decision.intent
+            self.stage = ConversationStage.AWAITING_FOLLOWUP
+            parts = []
+            ack = _CLOSING_BY_INTENT.get(decision.intent)
+            if ack:
+                parts.append(ack(self.language))
+            secondary = secondary_intent_line(decision, self.language)
+            if secondary:
+                parts.append(secondary)
+            parts.append(followup_question(self.language))
+            return self._apply_tone(" ".join(parts), decision)
 
         self.stage = ConversationStage.ENDED
-        return closing_line_for_intent(decision, self.language)
+        parts = []
+        secondary = secondary_intent_line(decision, self.language)
+        if secondary:
+            parts.append(secondary)
+        parts.append(closing_line_for_intent(decision, self.language))
+        return self._apply_tone(" ".join(parts), decision)
 
     def _handle_promise_date(self, utterance: str) -> str:
         decision2 = self._classifier(ClassificationStage.PROMISE_DATE, self.consumer, utterance, self.transcript)
@@ -503,8 +719,23 @@ class ConversationEngine:
             update={
                 "promise_to_pay_date": decision2.promise_to_pay_date,
                 "notes": notes or self.decision.notes,
+                "customer_angry": decision2.customer_angry,
             }
         )
         self.decision = merged
         self.stage = ConversationStage.ENDED
-        return closing_line_for_intent(merged, self.language)
+        return self._apply_tone(closing_line_for_intent(merged, self.language), merged)
+
+    def _handle_followup(self, utterance: str) -> str:
+        """The single response to whatever follow-up question was asked in
+        _handle_main_response (e.g. "do you have the receipt?", "would you
+        like this reviewed?"). Kept intentionally simple -- acknowledge and
+        close -- rather than branching further per answer, matching the
+        spec's own "If YES: thank you... [close]" pattern for every
+        category."""
+        decision = self._classifier(ClassificationStage.FOLLOWUP, self.consumer, utterance, self.transcript)
+        if decision.do_not_call:
+            self.stage = ConversationStage.ENDED
+            return dnc_ack_line(self.language)
+        self.stage = ConversationStage.ENDED
+        return self._apply_tone(closing_line(self.language), decision)

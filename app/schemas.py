@@ -59,6 +59,11 @@ class CustomerIntent(StrEnum):
     NEEDS_MORE_TIME = "NEEDS_MORE_TIME"
     CALL_BACK = "CALL_BACK"
     DISPUTE = "DISPUTE"
+    REFUSES_TO_PAY = "REFUSES_TO_PAY"
+    NOT_MY_ACCOUNT = "NOT_MY_ACCOUNT"
+    NOT_MY_ADDRESS = "NOT_MY_ADDRESS"
+    COMPLAINT_NOT_ADDRESSED = "COMPLAINT_NOT_ADDRESSED"
+    CUSTOMER_QUESTION = "CUSTOMER_QUESTION"
     WRONG_NUMBER = "WRONG_NUMBER"
     WRONG_PERSON = "WRONG_PERSON"
     NOT_INTERESTED = "NOT_INTERESTED"
@@ -335,6 +340,8 @@ class CallDecision(BaseModel):
     """
 
     intent: CustomerIntent
+    secondary_intent: CustomerIntent | None = None  # best-effort second concern in the same utterance (LLM path only)
+    customer_angry: bool = False  # tone flag, not an intent -- prepends an empathetic line regardless of category
     detected_language: SupportedLanguage | None = None
     promise_to_pay_date: dt.date | None = None
     human_followup: bool = False

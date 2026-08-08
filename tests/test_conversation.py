@@ -176,6 +176,132 @@ def test_dispute_routes_to_human_followup():
     assert engine.decision.human_followup is True
 
 
+# ---------------------------------------------------------------------------
+# "NEVER disconnect immediately after a single response" (K-Electric calling
+# spec, user-supplied 2026-08-08): most categories must ask a follow-up
+# question and LISTEN before closing, not end the call after one exchange.
+# ---------------------------------------------------------------------------
+def _classifier_for(main_response_decision: CallDecision):
+    def fake_classifier(stage, consumer, utterance, history):
+        if stage == ClassificationStage.VERIFY_IDENTITY:
+            return CallDecision(intent=CustomerIntent.OTHER, verification_passed=True)
+        return main_response_decision
+
+    return fake_classifier
+
+
+@pytest.mark.parametrize(
+    "intent,expected_phrase",
+    [
+        (CustomerIntent.ALREADY_PAID, "receipt"),
+        (CustomerIntent.DISPUTE, "anything else"),
+        (CustomerIntent.HUMAN_ASSISTANCE, "anything else"),
+        (CustomerIntent.INSTALLMENT_REQUEST, "anything else"),
+        (CustomerIntent.REFUSES_TO_PAY, "reviewed"),
+        (CustomerIntent.NOT_MY_ACCOUNT, "verify"),
+        (CustomerIntent.NOT_MY_ADDRESS, "anything else"),
+        (CustomerIntent.COMPLAINT_NOT_ADDRESSED, "reference"),
+    ],
+)
+def test_followup_intents_ask_a_question_and_do_not_end_the_call(intent, expected_phrase):
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=intent, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("some response")
+
+    assert engine.stage == ConversationStage.AWAITING_FOLLOWUP
+    assert expected_phrase in line.lower()
+
+
+def test_followup_stage_closes_the_call_on_the_next_response():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=CustomerIntent.ALREADY_PAID, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("I already paid")
+    assert engine.stage == ConversationStage.AWAITING_FOLLOWUP
+
+    line = engine.respond("Yes I have the receipt")
+    assert engine.stage == ConversationStage.ENDED
+    assert "goodbye" in line.lower() or "good day" in line.lower() or "thank you" in line.lower()
+
+
+def test_followup_stage_do_not_call_still_ends_immediately():
+    consumer = _consumer()
+    call_count = 0
+
+    def fake_classifier(stage, consumer, utterance, history):
+        nonlocal call_count
+        call_count += 1
+        if stage == ClassificationStage.VERIFY_IDENTITY:
+            return CallDecision(intent=CustomerIntent.OTHER, verification_passed=True)
+        if call_count == 2:
+            return CallDecision(intent=CustomerIntent.ALREADY_PAID, human_followup=True)
+        return CallDecision(intent=CustomerIntent.OTHER, do_not_call=True)
+
+    engine = ConversationEngine(consumer, language=SupportedLanguage.ENGLISH, classifier=fake_classifier)
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("I already paid")
+    assert engine.stage == ConversationStage.AWAITING_FOLLOWUP
+
+    line = engine.respond("Stop calling me")
+    assert engine.stage == ConversationStage.ENDED
+    assert "not call" in line.lower()
+
+
+def test_customer_question_answers_and_keeps_listening_instead_of_ending():
+    """Spec Category H + end-of-call rule: never disconnect on a question."""
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("Why are you calling me?")
+
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE  # still listening, not ended
+    assert "customer service" in line.lower()
+
+
+def test_secondary_intent_is_addressed_in_the_same_reply():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(
+            CallDecision(intent=CustomerIntent.ALREADY_PAID, secondary_intent=CustomerIntent.COMPLAINT_NOT_ADDRESSED, human_followup=True)
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("I already paid and my complaint was never resolved")
+
+    assert "verify the payment record" in line.lower()  # primary (ALREADY_PAID) ack
+    assert "resolved" in line.lower()  # secondary (COMPLAINT_NOT_ADDRESSED) ack
+
+
+def test_customer_angry_prepends_empathetic_line():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=CustomerIntent.ALREADY_PAID, customer_angry=True, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("I ALREADY paid this, why do you keep calling!")
+
+    assert "understand that you are upset" in line.lower()
+    assert "receipt" in line.lower()  # the actual category response still follows
+
+
 def test_language_switch_mid_call():
     consumer = _consumer()
     engine = ConversationEngine(consumer, language=SupportedLanguage.URDU, classifier=lambda *a: CallDecision(intent=CustomerIntent.OTHER))
@@ -308,3 +434,22 @@ def test_keyword_fallback_detects_dispute_variants(utterance):
 def test_keyword_fallback_detects_not_interested_variants(utterance):
     decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
     assert decision.intent == CustomerIntent.NOT_INTERESTED
+
+
+@pytest.mark.parametrize(
+    "utterance,expected_intent",
+    [
+        ("I don't pay this bill.", CustomerIntent.REFUSES_TO_PAY),
+        ("I won't pay.", CustomerIntent.REFUSES_TO_PAY),
+        ("This is not my account.", CustomerIntent.NOT_MY_ACCOUNT),
+        ("That's someone else's meter.", CustomerIntent.NOT_MY_ACCOUNT),
+        ("This is not my house.", CustomerIntent.NOT_MY_ADDRESS),
+        ("I don't live there anymore.", CustomerIntent.NOT_MY_ADDRESS),
+        ("My complaint has not been resolved.", CustomerIntent.COMPLAINT_NOT_ADDRESSED),
+        ("I don't have money to pay right now.", CustomerIntent.NEEDS_MORE_TIME),
+        ("Why are you calling me?", CustomerIntent.CUSTOMER_QUESTION),
+    ],
+)
+def test_keyword_fallback_detects_new_category_variants(utterance, expected_intent):
+    decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
+    assert decision.intent == expected_intent

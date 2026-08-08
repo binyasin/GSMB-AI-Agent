@@ -303,6 +303,23 @@ def classify_with_llm(
     )
 
 
+def _llm_classifier_with_fallback(
+    stage: ClassificationStage, consumer: ConsumerRecord, utterance: str, history: list[TranscriptTurn] | None = None
+) -> CallDecision:
+    """Wraps classify_with_llm so a live call keeps going even if the LLM
+    call itself fails (API outage, rate limit, or -- the case that prompted
+    this, 2026-08-08 -- an Anthropic account with an expired/zero credit
+    balance): classify_with_llm has no try/except of its own around the
+    network call, so an error there would otherwise propagate up and end
+    the call mid-conversation. Falls back to the same offline classifier
+    used when no AI_API_KEY is configured at all."""
+    try:
+        return classify_with_llm(stage, consumer, utterance, history)
+    except Exception:
+        logger.exception("classify_with_llm failed; falling back to keyword_fallback_classifier for this turn")
+        return keyword_fallback_classifier(stage, consumer, utterance, history)
+
+
 _DATE_HINT_WORDS = (
     "today", "aaj", "tomorrow", "kal", "monday", "tuesday", "wednesday", "thursday",
     "friday", "saturday", "sunday", "week", "hafte",
@@ -395,7 +412,7 @@ class ConversationEngine:
     def _default_classifier():
         settings = get_settings()
         if settings.ai_api_key:
-            return lambda stage, consumer, utterance, history: classify_with_llm(stage, consumer, utterance, history)
+            return _llm_classifier_with_fallback
         logger.warning("AI_API_KEY not configured; using offline keyword_fallback_classifier (not for production)")
         return keyword_fallback_classifier
 

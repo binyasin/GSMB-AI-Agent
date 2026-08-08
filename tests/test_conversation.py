@@ -250,6 +250,20 @@ def test_classify_with_llm_falls_back_safely_on_invalid_payload(mocker):
     assert decision.human_followup is True
 
 
+def test_llm_classifier_with_fallback_uses_keyword_classifier_on_api_error(mocker):
+    """Regression test: a live call (2026-08-08) confirmed classify_with_llm
+    has no try/except of its own around the network call -- an Anthropic API
+    error (that day: an account with zero credit balance) would otherwise
+    propagate up and end the call mid-conversation instead of just degrading
+    to the offline classifier for that turn."""
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    mocker.patch("app.conversation_engine.classify_with_llm", side_effect=RuntimeError("credit balance too low"))
+
+    decision = _llm_classifier_with_fallback(ClassificationStage.MAIN_RESPONSE, _consumer(), "don't call me again", [])
+    assert decision.intent == CustomerIntent.DO_NOT_CALL
+
+
 # ---------------------------------------------------------------------------
 # keyword_fallback_classifier: natural Urdu phrasing coverage (regression
 # tests for gaps found while demonstrating scenarios manually)

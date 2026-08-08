@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import get_settings
-from app.conversation_engine import ConversationEngine
+from app.conversation_engine import ConversationEngine, no_speech_closing_line, no_speech_reprompt_line
 from app.schemas import ConsumerRecord, SupportedLanguage
 
 logger = logging.getLogger("calls")
@@ -60,6 +60,7 @@ router = APIRouter(prefix="/webhooks/voice", tags=["voice-webhooks"])
 
 TTS_TIMEOUT_SECONDS = 10
 STT_TURN_TIMEOUT_SECONDS = 30
+MAX_CONSECUTIVE_EMPTY_TURNS = 3
 
 # attempt_uid -> ConversationEngine (single-process registry, see module docstring)
 ACTIVE_CONVERSATIONS: dict[str, ConversationEngine] = {}
@@ -115,23 +116,38 @@ async def handle_turn_result(
     engine: ConversationEngine,
     transcript: str | None,
     speak: Callable[[str], Awaitable[None]],
-) -> bool:
+    consecutive_empty_turns: int = 0,
+) -> tuple[bool, int]:
     """Advance the conversation given one turn's transcript and speak the
     agent's reply if there is one.
 
     `transcript` is None when the call ended (Twilio 'stop') before this
-    turn produced a transcript. Returns True if another turn should be
-    listened for, False if the call loop should stop (either it already
-    ended, or the conversation just reached ENDED).
+    turn produced a transcript. Returns (should_continue, new_consecutive_
+    empty_turns) -- should_continue is False if the call loop should stop
+    (already ended, conversation reached ENDED, or MAX_CONSECUTIVE_EMPTY_TURNS
+    unrecognized turns happened in a row).
+
+    A live call (2026-08-08) confirmed that an unrecognized turn used to
+    stay completely silent and just listen again -- from the caller's side,
+    several turns of dead air (each up to STT_TURN_TIMEOUT_SECONDS long)
+    felt exactly like a frozen/dropped call, and they hung up. Now the agent
+    re-prompts on an unclear turn instead of going silent, and gives up
+    gracefully with a closing line after repeated silence instead of
+    looping re-prompts forever.
     """
     if transcript is None:
-        return False
+        return False, consecutive_empty_turns
     if not transcript.strip():
-        return True  # nothing recognized this turn; keep listening
+        consecutive_empty_turns += 1
+        if consecutive_empty_turns >= MAX_CONSECUTIVE_EMPTY_TURNS:
+            await speak(no_speech_closing_line(engine.language))
+            return False, consecutive_empty_turns
+        await speak(no_speech_reprompt_line(engine.language))
+        return True, consecutive_empty_turns
     reply = engine.respond(transcript)
     if reply:
         await speak(reply)
-    return engine.stage.value != "ENDED"
+    return engine.stage.value != "ENDED", 0
 
 
 async def _process_turn(
@@ -274,6 +290,7 @@ async def media_stream(websocket: WebSocket):
             )
 
         turn_number = 0
+        consecutive_empty_turns = 0
         while True:
             turn_number += 1
             logger.info("attempt=%s: turn %d: listening", attempt, turn_number)
@@ -285,7 +302,9 @@ async def media_stream(websocket: WebSocket):
                 _process_turn(websocket, speech_client, engine.language), timeout=STT_TURN_TIMEOUT_SECONDS + 10
             )
             logger.info("attempt=%s: turn %d: transcript=%r", attempt, turn_number, transcript)
-            should_continue = await handle_turn_result(engine, transcript, speak)
+            should_continue, consecutive_empty_turns = await handle_turn_result(
+                engine, transcript, speak, consecutive_empty_turns
+            )
             if not should_continue:
                 break
 

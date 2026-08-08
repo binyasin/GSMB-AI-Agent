@@ -197,6 +197,26 @@ def closing_line_for_intent(decision: CallDecision, language: SupportedLanguage)
     return prefix + closing_line(language)
 
 
+def no_speech_reprompt_line(language: SupportedLanguage) -> str:
+    """Spoken when a turn produced no recognizable transcript. A live call
+    (2026-08-08) confirmed that staying completely silent here -- just
+    listening again with no acknowledgement -- made the call feel dead and
+    got hung up on; the caller has no way to know the system is still
+    there."""
+    if language == SupportedLanguage.URDU:
+        return "Maazrat, mujhe sunai nahin diya. Barah-e-karam dobara bataiye."
+    return "Sorry, I didn't catch that. Could you please repeat?"
+
+
+def no_speech_closing_line(language: SupportedLanguage) -> str:
+    """Spoken when MAX_CONSECUTIVE_EMPTY_TURNS unrecognized turns happen in
+    a row -- ends the call gracefully instead of looping re-prompts
+    indefinitely."""
+    if language == SupportedLanguage.URDU:
+        return "Maazrat, hum aap ki awaz sun nahin pa rahe. Hum baad mein dobara raabta karein ge. Allah Hafiz."
+    return "I'm sorry, we're unable to hear you clearly right now. We'll follow up again later. Goodbye."
+
+
 # ---------------------------------------------------------------------------
 # LLM-backed NLU classification (spec Sec.25, Sec.39)
 # ---------------------------------------------------------------------------

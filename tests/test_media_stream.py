@@ -72,22 +72,44 @@ async def test_handle_turn_result_none_transcript_stops_loop():
     engine = _engine()
     spoken = []
 
-    should_continue = await handle_turn_result(engine, None, lambda text: spoken.append(text))
+    should_continue, empty_count = await handle_turn_result(engine, None, lambda text: spoken.append(text))
     assert should_continue is False
     assert spoken == []
+    assert empty_count == 0
 
 
 @pytest.mark.anyio
-async def test_handle_turn_result_empty_transcript_keeps_listening():
+async def test_handle_turn_result_empty_transcript_reprompts_and_keeps_listening():
+    """Regression test: a live call (2026-08-08) confirmed that staying
+    completely silent on an unrecognized turn -- just listening again with
+    no acknowledgement -- made the call feel dead and got hung up on."""
     engine = _engine()
     spoken = []
 
     async def speak(text):
         spoken.append(text)
 
-    should_continue = await handle_turn_result(engine, "   ", speak)
+    should_continue, empty_count = await handle_turn_result(engine, "   ", speak)
     assert should_continue is True
-    assert spoken == []  # engine.respond was never called for empty input
+    assert empty_count == 1
+    assert len(spoken) == 1  # re-prompted instead of staying silent
+    assert "didn't catch" in spoken[0].lower()
+
+
+@pytest.mark.anyio
+async def test_handle_turn_result_ends_call_after_max_consecutive_empty_turns():
+    from app.webhooks.media_stream import MAX_CONSECUTIVE_EMPTY_TURNS
+
+    engine = _engine()
+    spoken = []
+
+    async def speak(text):
+        spoken.append(text)
+
+    should_continue, empty_count = await handle_turn_result(engine, "", speak, MAX_CONSECUTIVE_EMPTY_TURNS - 1)
+    assert should_continue is False
+    assert empty_count == MAX_CONSECUTIVE_EMPTY_TURNS
+    assert "unable to hear" in spoken[-1].lower()
 
 
 @pytest.mark.anyio
@@ -98,10 +120,23 @@ async def test_handle_turn_result_speaks_reply_and_continues_mid_conversation():
     async def speak(text):
         spoken.append(text)
 
-    should_continue = await handle_turn_result(engine, "Yes speaking", speak)
+    should_continue, empty_count = await handle_turn_result(engine, "Yes speaking", speak)
     assert should_continue is True  # verification passed -> more turns expected
+    assert empty_count == 0  # a real transcript resets the counter
     assert len(spoken) == 1
     assert "outstanding" in spoken[0].lower() or "1,000" in spoken[0]
+
+
+@pytest.mark.anyio
+async def test_handle_turn_result_real_transcript_resets_empty_counter():
+    engine = _engine()
+    spoken = []
+
+    async def speak(text):
+        spoken.append(text)
+
+    _, empty_count = await handle_turn_result(engine, "Yes speaking", speak, consecutive_empty_turns=2)
+    assert empty_count == 0
 
 
 @pytest.mark.anyio
@@ -115,8 +150,9 @@ async def test_handle_turn_result_stops_when_conversation_ends():
     async def speak(text):
         spoken.append(text)
 
-    should_continue = await handle_turn_result(engine, "Don't call me again", speak)
+    should_continue, empty_count = await handle_turn_result(engine, "Don't call me again", speak)
     assert should_continue is False
+    assert empty_count == 0
     assert len(spoken) == 1
 
 

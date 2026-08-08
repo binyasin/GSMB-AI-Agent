@@ -95,7 +95,7 @@ class SupportedLanguage(StrEnum):
 #     requiring new sheet columns. The local DoNotCall DB registry
 #     (app/models.py) remains the authoritative compliance backstop
 #     regardless of how this heuristic reads any given row.
-#   - "DUES" is the single figure read aloud to consumers as the outstanding
+#   - "DUES in PKR" is the single figure read aloud to consumers as the outstanding
 #     balance (not "Total Due Billing" or "Recovery Amount", which are
 #     stored but never spoken).
 #   - CD, MRU, DUE BCM, LPD, LPA, IBC are opaque K-Electric reference codes:
@@ -108,7 +108,7 @@ REQUIRED_SHEET_COLUMNS = [
     "Consumer No.",
     "Name",
     "Consumer Phone Number",
-    "DUES",
+    "DUES in PKR",
     "Call Status",
     "Call Date",
 ]
@@ -129,7 +129,7 @@ ALL_SHEET_COLUMNS = [
     "Total Due Billing",
     "LPD",
     "LPA",
-    "DUES",
+    "DUES in PKR",
     "Scheme eligibility",
     "Consumer Phone Number",
     "IBC",
@@ -281,7 +281,7 @@ class ConsumerRecord(BaseModel):
             lpd=(row.get("LPD") or "").strip() or None,
             lpa=(row.get("LPA") or "").strip() or None,
             ibc=(row.get("IBC") or "").strip() or None,
-            outstanding_amount=_num(row.get("DUES")),
+            outstanding_amount=_num(row.get("DUES in PKR")),
             total_due_units=_num(row.get("Total Due Units")),
             total_due_billing=_num(row.get("Total Due Billing")),
             recovery_amount=_num(row.get("Recovery Amount")),

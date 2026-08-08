@@ -33,6 +33,38 @@ def _money(amount: float | None) -> str | None:
     return f"Rs. {amount:,.0f}"
 
 
+def _money_urdu(amount: float | None) -> str | None:
+    """South Asian lakh/hazar/sau place-value grouping, spoken in Urdu
+    (e.g. 608311 -> "6 lakh 8 hazar 3 sau 11 rupay"). A live call
+    (2026-08-08) confirmed a plain Western comma-grouped figure ("Rs.
+    608,311") is unintelligible when read aloud by an Urdu TTS voice -- it
+    comes out as disconnected digit groups ("608 rupay 311"), not a number.
+    Each place-value chunk here stays small (at most 2 digits) so any TTS
+    voice pronounces it correctly; only the lakh/hazar/sau words themselves
+    need to be understood, not full Urdu number-words."""
+    if amount is None:
+        return None
+    n = round(amount)
+    if n == 0:
+        return "0 rupay"
+    parts = []
+    crore, n = divmod(n, 10_000_000)
+    if crore:
+        parts.append(f"{crore} crore")
+    lakh, n = divmod(n, 100_000)
+    if lakh:
+        parts.append(f"{lakh} lakh")
+    hazar, n = divmod(n, 1_000)
+    if hazar:
+        parts.append(f"{hazar} hazar")
+    sau, n = divmod(n, 100)
+    if sau:
+        parts.append(f"{sau} sau")
+    if n:
+        parts.append(str(n))
+    return " ".join(parts) + " rupay"
+
+
 def _date_str(d: dt.date | None) -> str | None:
     return d.strftime("%d-%m-%Y") if d else None
 
@@ -71,11 +103,12 @@ def dnc_ack_line(language: SupportedLanguage) -> str:
 def dues_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
     parts_ur = []
     parts_en = []
-    outstanding = _money(consumer.outstanding_amount)
+    outstanding_ur = _money_urdu(consumer.outstanding_amount)
+    outstanding_en = _money(consumer.outstanding_amount)
     due = _date_str(consumer.due_date)
-    if outstanding:
-        parts_ur.append(f"hamare authorized record ke mutabiq aap ke account par {outstanding} outstanding hain")
-        parts_en.append(f"according to our authorized record, your account has {outstanding} outstanding")
+    if outstanding_ur:
+        parts_ur.append(f"hamare authorized record ke mutabiq aap ke account par {outstanding_ur} outstanding hain")
+        parts_en.append(f"according to our authorized record, your account has {outstanding_en} outstanding")
     if due:
         parts_ur.append(f"due date {due} hai")
         parts_en.append(f"with a due date of {due}")

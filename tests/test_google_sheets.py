@@ -27,14 +27,14 @@ def test_validate_required_columns_raises_when_missing():
     with pytest.raises(SheetValidationError) as exc:
         GoogleSheetRepository(ws).validate_required_columns()
     assert "Consumer Phone Number" in str(exc.value)
-    assert "DUES" in str(exc.value)
+    assert "DUES in PKR" in str(exc.value)
 
 
 def test_missing_optional_columns_handled_gracefully():
     # Only the required minimum columns are present; everything else should
     # default rather than raise.
     ws = FakeWorksheet(
-        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date"],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES in PKR", "Call Status", "Call Date"],
         rows=[["CN-100", "Test User", "03001112233", "1000", "PENDING", ""]],
     )
     records = GoogleSheetRepository(ws).read_rows()
@@ -45,7 +45,7 @@ def test_missing_optional_columns_handled_gracefully():
 
 def test_already_paid_derived_from_call_outcome_text():
     ws = FakeWorksheet(
-        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date", "Call out come"],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES in PKR", "Call Status", "Call Date", "Call out come"],
         rows=[["CN-200", "Test User", "03001112233", "1000", "COMPLETED", "", "ALREADY_PAID"]],
     )
     records = GoogleSheetRepository(ws).read_rows()
@@ -54,7 +54,7 @@ def test_already_paid_derived_from_call_outcome_text():
 
 def test_blank_consumer_no_rows_skipped():
     ws = FakeWorksheet(
-        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date"],
+        headers=["Consumer No.", "Name", "Consumer Phone Number", "DUES in PKR", "Call Status", "Call Date"],
         rows=[["", "Blank Row", "", "", "", ""]],
     )
     assert GoogleSheetRepository(ws).read_rows() == []
@@ -96,7 +96,7 @@ def test_update_row_unknown_column_raises():
 # Derived-from-text heuristics (no dedicated Already Paid / Do Not Call /
 # Human Follow-up columns exist in the real sheet — see app/schemas.py)
 # ---------------------------------------------------------------------------
-_BASE_HEADERS = ["Consumer No.", "Name", "Consumer Phone Number", "DUES", "Call Status", "Call Date", "Call out come"]
+_BASE_HEADERS = ["Consumer No.", "Name", "Consumer Phone Number", "DUES in PKR", "Call Status", "Call Date", "Call out come"]
 
 
 def _row_with(call_status: str = "", call_outcome: str = "") -> "FakeWorksheet":

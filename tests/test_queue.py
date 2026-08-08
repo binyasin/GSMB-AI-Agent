@@ -56,7 +56,7 @@ def test_zero_or_missing_outstanding_amount_not_eligible(db_session):
     row[headers.index("Consumer No.")] = "CN-ZERO"
     row[headers.index("Name")] = "Zero Due"
     row[headers.index("Consumer Phone Number")] = "03001112233"
-    row[headers.index("DUES")] = "0"
+    row[headers.index("DUES in PKR")] = "0"
     row[headers.index("Call Status")] = "PENDING"
     ws = FakeWorksheet(headers, [row])
     records = GoogleSheetRepository(ws).read_rows()

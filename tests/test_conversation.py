@@ -50,6 +50,17 @@ def test_dues_line_includes_all_present_fields():
     assert "15-08-2026" in line
 
 
+def test_dues_line_urdu_uses_lakh_hazar_sau_grouping():
+    """Regression test: a live call (2026-08-08) confirmed a plain
+    comma-grouped figure ("Rs. 608,311") read aloud by Urdu TTS comes out as
+    disconnected digit groups ("608 rupay 311"), not an intelligible number.
+    Urdu must use South Asian lakh/hazar/sau place-value grouping instead."""
+    consumer = _consumer(outstanding_amount=608311, due_date=None)
+    line = dues_line(consumer, SupportedLanguage.URDU)
+    assert "6 lakh 8 hazar 3 sau 11 rupay" in line
+    assert "608,311" not in line
+
+
 def test_scheme_line_absent_when_not_eligible():
     consumer = _consumer(installment_eligible=False)
     assert scheme_line(consumer, SupportedLanguage.ENGLISH) is None

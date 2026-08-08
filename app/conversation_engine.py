@@ -41,8 +41,8 @@ def greeting_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
     name = consumer.consumer_name or "sahib/sahiba"
     if language == SupportedLanguage.URDU:
         return (
-            "Assalam-o-Alaikum. Main GSM Brothers se call kar raha/rahi hoon, "
-            f"K-Electric consumer account ke hawale se. Kya main {name} se baat kar raha/rahi hoon?"
+            "Assalam-o-Alaikum. Main GSM Brothers se call kar rahi hoon, "
+            f"K-Electric consumer account ke hawale se. Kya main {name} se baat kar rahi hoon?"
         )
     return (
         "Hello, this is GSM Brothers calling on behalf of K-Electric regarding your consumer account. "

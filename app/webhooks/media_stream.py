@@ -58,6 +58,9 @@ logger = logging.getLogger("calls")
 
 router = APIRouter(prefix="/webhooks/voice", tags=["voice-webhooks"])
 
+TTS_TIMEOUT_SECONDS = 10
+STT_TURN_TIMEOUT_SECONDS = 30
+
 # attempt_uid -> ConversationEngine (single-process registry, see module docstring)
 ACTIVE_CONVERSATIONS: dict[str, ConversationEngine] = {}
 
@@ -142,6 +145,7 @@ async def _process_turn(websocket: WebSocket, speech_client, language: Supported
     """
     session = speech_client.open_turn_session(language)
     transcript_task = asyncio.ensure_future(asyncio.to_thread(session.run))
+    chunks_fed = 0
 
     try:
         while not transcript_task.done():
@@ -157,22 +161,55 @@ async def _process_turn(websocket: WebSocket, speech_client, language: Supported
             event = message.get("event")
             if event == "media":
                 session.feed(decode_media_payload(message))
+                chunks_fed += 1
             elif event == "stop":
                 session.close()
                 transcript_task.cancel()
                 return None
     finally:
         session.close()
+        logger.info("turn fed %d inbound audio chunk(s) to Google STT", chunks_fed)
 
     return await transcript_task
 
 
 @router.websocket("/media-stream")
-async def media_stream(websocket: WebSocket, attempt: str):
-    """Twilio Media Streams entry point. Query param `attempt` is the CallAttempt.attempt_uid."""
+async def media_stream(websocket: WebSocket):
+    """Twilio Media Streams entry point.
+
+    attempt_uid arrives as a <Parameter> inside Twilio's 'start' event
+    (start.customParameters.attempt), NOT as a URL query string -- Twilio
+    Media Streams rejects the WebSocket handshake outright (error 31920) if
+    the <Stream> URL carries a query string, so it can't be a FastAPI query
+    param here the way the HTTP webhooks below use it."""
     await websocket.accept()
     settings = get_settings()
-    state = MediaStreamState(attempt_uid=attempt)
+
+    # Twilio sends 'connected' immediately on handshake, then 'start' right
+    # after it -- 'connected' carries no stream/call metadata and must be
+    # skipped rather than treated as the first real message.
+    try:
+        message: dict = {}
+        while message.get("event") != "start":
+            raw = await websocket.receive_text()
+            message = parse_twilio_message(raw)
+            if message.get("event") == "stop":
+                return
+            if message.get("event") not in ("connected", "start"):
+                logger.error("expected Twilio 'connected'/'start' event, got %r; closing stream", message.get("event"))
+                await websocket.close(code=1011)
+                return
+    except WebSocketDisconnect:
+        return
+
+    start = message["start"]
+    attempt = start.get("customParameters", {}).get("attempt")
+    state = MediaStreamState(attempt_uid=attempt, stream_sid=start["streamSid"], call_sid=start.get("callSid"))
+
+    if not attempt:
+        logger.error("Twilio 'start' event missing customParameters.attempt; closing stream")
+        await websocket.close(code=1011)
+        return
 
     from app.speech.google_speech import GoogleSpeechClient
 
@@ -189,31 +226,44 @@ async def media_stream(websocket: WebSocket, attempt: str):
         await websocket.close(code=1011)
         return
 
+    # A hung Google API call here (TTS or STT) previously failed *silently*
+    # forever -- no exception, no log line, just a dead call until Twilio's
+    # own timeout kicked in -- because only WebSocketDisconnect was caught
+    # and nothing bounded how long a single synthesize/recognize call could
+    # block. TTS_TIMEOUT_SECONDS/STT_TURN_TIMEOUT_SECONDS convert a hang into
+    # a loggable, recoverable failure instead.
     try:
-        # Wait for Twilio's 'start' event before doing anything else -- it
-        # carries the streamSid every outbound 'media' message must include.
-        while state.stream_sid is None:
-            raw = await websocket.receive_text()
-            message = parse_twilio_message(raw)
-            if message.get("event") == "start":
-                state.stream_sid = message["start"]["streamSid"]
-                state.call_sid = message["start"].get("callSid")
-            elif message.get("event") == "stop":
-                return
-
+        logger.info("attempt=%s: synthesizing greeting", attempt)
         greeting = engine.start()
-        await _synthesize_and_send(websocket, speech_client, greeting, engine.language, state.stream_sid)
+        await asyncio.wait_for(
+            _synthesize_and_send(websocket, speech_client, greeting, engine.language, state.stream_sid),
+            timeout=TTS_TIMEOUT_SECONDS,
+        )
+        logger.info("attempt=%s: greeting sent, entering conversation loop", attempt)
 
         async def speak(text: str) -> None:
-            await _synthesize_and_send(websocket, speech_client, text, engine.language, state.stream_sid)
+            await asyncio.wait_for(
+                _synthesize_and_send(websocket, speech_client, text, engine.language, state.stream_sid),
+                timeout=TTS_TIMEOUT_SECONDS,
+            )
 
+        turn_number = 0
         while True:
-            transcript = await _process_turn(websocket, speech_client, engine.language)
+            turn_number += 1
+            logger.info("attempt=%s: turn %d: listening", attempt, turn_number)
+            transcript = await asyncio.wait_for(
+                _process_turn(websocket, speech_client, engine.language), timeout=STT_TURN_TIMEOUT_SECONDS
+            )
+            logger.info("attempt=%s: turn %d: transcript=%r", attempt, turn_number, transcript)
             should_continue = await handle_turn_result(engine, transcript, speak)
             if not should_continue:
                 break
 
     except WebSocketDisconnect:
         logger.info("Twilio media stream disconnected for attempt=%s", attempt)
+    except TimeoutError:
+        logger.exception("attempt=%s: timed out waiting on Google Speech; ending call", attempt)
+    except Exception:
+        logger.exception("attempt=%s: unexpected error in media stream loop; ending call", attempt)
     finally:
         pop_conversation(attempt)

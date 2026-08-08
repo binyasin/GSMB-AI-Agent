@@ -333,6 +333,10 @@ def process_next_consumer(
 
     # telephony_provider is guaranteed non-None here (checked before any job
     # state was touched, above).
+    from app.webhooks.media_stream import register_conversation
+
+    register_conversation(attempt.attempt_uid, _consumer_to_record(consumer), SupportedLanguage.URDU)
+
     base_url = settings.public_base_url
     voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
     status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"
@@ -395,6 +399,10 @@ def run_test_call(session: Session, telephony_provider: TelephonyProvider | None
         from app.telephony.twilio_provider import TwilioProvider
 
         telephony_provider = TwilioProvider(settings)
+
+    from app.webhooks.media_stream import register_conversation
+
+    register_conversation(attempt.attempt_uid, _consumer_to_record(consumer), SupportedLanguage.URDU)
 
     base_url = settings.public_base_url
     voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"

@@ -25,6 +25,17 @@ _LANGUAGE_CODES = {
     SupportedLanguage.ENGLISH: "en-US",
 }
 
+# Google Cloud Text-to-Speech has no ur-PK voices at all (confirmed via
+# list_voices(), 2026-08-08) -- only ur-IN. STT recognition works fine with
+# ur-PK (real captured-call audio transcribed correctly), so only the TTS
+# side needs a different language/voice; STT keeps using _LANGUAGE_CODES.
+# Chirp3-HD is Google's newest, most natural-sounding tier -- picked after a
+# live call using an unset (default-fallback) voice came out slow/unclear.
+_TTS_VOICE = {
+    SupportedLanguage.URDU: ("ur-IN", "ur-IN-Chirp3-HD-Aoede"),
+    SupportedLanguage.ENGLISH: ("en-US", "en-US-Chirp3-HD-Aoede"),
+}
+
 
 def language_code_for(language: SupportedLanguage) -> str:
     return _LANGUAGE_CODES[language]
@@ -77,6 +88,12 @@ class GoogleSpeechClient:
                 enable_automatic_punctuation=True,
             ),
             interim_results=False,
+            # Without this, Google never emits END_OF_SINGLE_UTTERANCE, so
+            # StreamingTurnSession.run()'s `for response in responses:` loop
+            # has nothing to break on -- it just blocks past the point the
+            # caller stops talking until the whole turn hits its outer
+            # timeout (see media_stream.py:STT_TURN_TIMEOUT_SECONDS).
+            single_utterance=True,
         )
 
     def transcribe_stream(self, audio_chunks, language: SupportedLanguage) -> str:
@@ -106,11 +123,12 @@ class GoogleSpeechClient:
         """Returns raw 8kHz mu-law audio bytes ready to stream back to Twilio."""
         from google.cloud import texttospeech
 
+        tts_language_code, voice_name = _TTS_VOICE[language]
         response = self._tts.synthesize_speech(
             input=texttospeech.SynthesisInput(text=text),
             voice=texttospeech.VoiceSelectionParams(
-                language_code=language_code_for(language),
-                ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
+                language_code=tts_language_code,
+                name=voice_name,
             ),
             audio_config=texttospeech.AudioConfig(
                 audio_encoding=texttospeech.AudioEncoding.MULAW,
@@ -157,18 +175,32 @@ class StreamingTurnSession:
 
     def run(self) -> str:
         """Blocking. Returns the final transcript for this utterance ("" if
-        nothing was recognized before the session ended)."""
+        nothing was recognized before the session ended).
+
+        Google sends END_OF_SINGLE_UTTERANCE as a boundary marker on its own
+        response, with zero results -- the response actually carrying the
+        final transcript for that utterance arrives *after* it, on the very
+        next message. Breaking as soon as the marker was seen (the previous
+        behavior) discarded that trailing transcript every time, which is
+        why every live call went completely silent after the greeting
+        despite real, clearly-spoken audio reaching Google (confirmed via
+        offline replay of captured call audio 2026-08-08) -- fixed by
+        consuming exactly one more response after the marker before
+        stopping."""
         from google.cloud import speech
 
         transcript = ""
+        seen_end_of_utterance = False
         try:
             responses = self._speech_client.streaming_recognize(config=self._config, requests=self._requests())
             for response in responses:
-                if response.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:
-                    break
                 for result in response.results:
                     if result.is_final and result.alternatives:
                         transcript = result.alternatives[0].transcript
+                if seen_end_of_utterance:
+                    break
+                if response.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:
+                    seen_end_of_utterance = True
         finally:
             # Guarantee the request generator can terminate even if we broke
             # out early or an exception interrupted iteration -- otherwise

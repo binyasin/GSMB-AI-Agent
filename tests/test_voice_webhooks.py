@@ -89,7 +89,10 @@ def test_incoming_returns_twiml_with_media_stream_url(db_session, monkeypatch):
     resp = _signed_post(client, f"/webhooks/voice/incoming?attempt={attempt.attempt_uid}", {"CallSid": "CA1"})
     assert resp.status_code == 200
     assert "<Connect>" in resp.text
-    assert f"attempt={attempt.attempt_uid}" in resp.text
+    # attempt_uid must travel as a <Parameter>, not a <Stream> query string
+    # (Twilio Media Streams rejects the handshake -- error 31920 -- otherwise).
+    assert f'name="attempt" value="{attempt.attempt_uid}"' in resp.text
+    assert "media-stream?" not in resp.text
     assert resp.text.startswith("<?xml")
 
 

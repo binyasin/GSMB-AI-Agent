@@ -81,8 +81,8 @@ async def incoming(
     await verify_and_extract(request, provider)
     settings = get_settings()
     ws_base = (settings.public_base_url or "").replace("https://", "wss://").replace("http://", "ws://")
-    stream_url = f"{ws_base}/webhooks/voice/media-stream?attempt={attempt}"
-    return Response(content=build_call_twiml(stream_url), media_type="application/xml")
+    stream_url = f"{ws_base}/webhooks/voice/media-stream"
+    return Response(content=build_call_twiml(stream_url, attempt), media_type="application/xml")
 
 
 @router.post("/status")

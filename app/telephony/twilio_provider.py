@@ -25,11 +25,17 @@ from app.telephony.base import CallHandle, TelephonyProvider
 logger = logging.getLogger("calls")
 
 
-def build_call_twiml(media_stream_url: str) -> str:
-    """TwiML that connects the call to our Media Streams WebSocket bridge."""
+def build_call_twiml(media_stream_url: str, attempt_uid: str) -> str:
+    """TwiML that connects the call to our Media Streams WebSocket bridge.
+
+    Twilio Media Streams rejects `<Stream>` URLs that carry a query string
+    (handshake fails with error 31920) -- attempt_uid must travel as a
+    <Parameter> instead, which Twilio delivers in the 'start' event's
+    customParameters (see media_stream.py)."""
     response = VoiceResponse()
     connect = Connect()
-    connect.stream(url=media_stream_url)
+    stream = connect.stream(url=media_stream_url)
+    stream.parameter(name="attempt", value=attempt_uid)
     response.append(connect)
     return str(response)
 

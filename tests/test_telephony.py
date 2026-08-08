@@ -8,9 +8,13 @@ from app.telephony.twilio_provider import TwilioProvider, build_call_twiml, buil
 
 
 def test_build_call_twiml_connects_media_stream():
-    xml = build_call_twiml("wss://example.com/webhooks/voice/media-stream")
+    xml = build_call_twiml("wss://example.com/webhooks/voice/media-stream", "attempt-uid-123")
     assert "<Connect>" in xml
+    # Media Streams rejects a query string on the <Stream> URL (Twilio error
+    # 31920) -- the URL must be bare, with attempt_uid carried as a <Parameter>.
     assert "wss://example.com/webhooks/voice/media-stream" in xml
+    assert "?" not in xml.split("url=")[1].split('"')[1]
+    assert 'name="attempt" value="attempt-uid-123"' in xml
 
 
 def test_build_transfer_twiml_dials_human_number():

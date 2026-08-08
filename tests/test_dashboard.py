@@ -137,3 +137,93 @@ def test_start_button_no_confirmation_needed_when_not_dry_run(monkeypatch, db_se
     at.button[0].click().run(timeout=30)  # START -- goes straight through, no DRY_RUN risk
 
     assert get_campaign_status(db_session) == CampaignStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# CLEAR TODAY button
+# ---------------------------------------------------------------------------
+def _find_button(at, label):
+    for b in at.button:
+        if b.label == label:
+            return b
+    raise AssertionError(f"no button labeled {label!r}; labels: {[b.label for b in at.button]}")
+
+
+def test_clear_today_button_shows_confirmation_first(monkeypatch, db_session):
+    from app.calling_agent import acquire_job_lock, create_attempt, finalize_call_attempt
+    from app.google_sheets import GoogleSheetRepository
+    from app.models import CallJob, Consumer
+    from app.queue_manager import build_daily_queue
+    from app.schemas import CallDecision, CallState, CustomerIntent
+    from tests.conftest import make_sample_worksheet
+
+    today = dt.date.today()
+    records = GoogleSheetRepository(make_sample_worksheet()).read_rows()
+    build_daily_queue(db_session, records, job_date=today)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=today).one()
+    acquire_job_lock(db_session, job)
+    consumer = db_session.query(Consumer).filter_by(consumer_no="CN-001").one()
+    attempt = create_attempt(db_session, job, consumer)
+    finalize_call_attempt(db_session, attempt, CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=today), "[]", 20, CallState.COMPLETED)
+
+    at = _run_dashboard(monkeypatch, db_session)
+    _find_button(at, "🗑 CLEAR TODAY").click().run(timeout=30)
+
+    warning_text = " ".join(w.value for w in at.warning)
+    assert "permanently deletes" in warning_text
+    assert "1 call record" in warning_text
+    # Nothing deleted yet -- still awaiting explicit confirmation.
+    from app.models import CallAttempt
+
+    assert db_session.query(CallAttempt).count() == 1
+
+
+def test_clear_today_confirm_yes_clears_records(monkeypatch, db_session):
+    from app.calling_agent import acquire_job_lock, create_attempt, finalize_call_attempt
+    from app.google_sheets import GoogleSheetRepository
+    from app.models import CallAttempt, CallJob, Consumer
+    from app.queue_manager import build_daily_queue
+    from app.schemas import CallDecision, CallState, CustomerIntent
+    from tests.conftest import make_sample_worksheet
+
+    today = dt.date.today()
+    records = GoogleSheetRepository(make_sample_worksheet()).read_rows()
+    build_daily_queue(db_session, records, job_date=today)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=today).one()
+    acquire_job_lock(db_session, job)
+    consumer = db_session.query(Consumer).filter_by(consumer_no="CN-001").one()
+    attempt = create_attempt(db_session, job, consumer)
+    finalize_call_attempt(db_session, attempt, CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=today), "[]", 20, CallState.COMPLETED)
+
+    at = _run_dashboard(monkeypatch, db_session)
+    _find_button(at, "🗑 CLEAR TODAY").click().run(timeout=30)
+    at.button(key="confirm_clear_yes").click().run(timeout=30)
+
+    assert not at.exception, [str(e) for e in at.exception]
+    assert db_session.query(CallAttempt).count() == 0
+    db_session.refresh(job)
+    assert job.state == CallState.PENDING.value
+
+
+def test_clear_today_cancel_leaves_records_untouched(monkeypatch, db_session):
+    from app.calling_agent import acquire_job_lock, create_attempt, finalize_call_attempt
+    from app.google_sheets import GoogleSheetRepository
+    from app.models import CallAttempt, CallJob, Consumer
+    from app.queue_manager import build_daily_queue
+    from app.schemas import CallDecision, CallState, CustomerIntent
+    from tests.conftest import make_sample_worksheet
+
+    today = dt.date.today()
+    records = GoogleSheetRepository(make_sample_worksheet()).read_rows()
+    build_daily_queue(db_session, records, job_date=today)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=today).one()
+    acquire_job_lock(db_session, job)
+    consumer = db_session.query(Consumer).filter_by(consumer_no="CN-001").one()
+    attempt = create_attempt(db_session, job, consumer)
+    finalize_call_attempt(db_session, attempt, CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=today), "[]", 20, CallState.COMPLETED)
+
+    at = _run_dashboard(monkeypatch, db_session)
+    _find_button(at, "🗑 CLEAR TODAY").click().run(timeout=30)
+    at.button(key="confirm_clear_cancel").click().run(timeout=30)
+
+    assert db_session.query(CallAttempt).count() == 1

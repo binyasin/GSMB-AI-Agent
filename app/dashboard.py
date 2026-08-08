@@ -20,7 +20,7 @@ import datetime as dt
 
 from sqlalchemy.orm import Session
 
-from app.calling_agent import retry_pending_sheet_syncs, run_test_call
+from app.calling_agent import clear_daily_records, retry_pending_sheet_syncs, run_test_call
 from app.config import ConfigurationError, get_settings
 from app.database import SessionLocal, init_db
 from app.models import CallAttempt, CallJob
@@ -420,6 +420,34 @@ def _render() -> None:  # pragma: no cover - Streamlit UI, exercised by manual r
         if b8.button("▤ REPORT", use_container_width=True):
             xlsx_path, csv_path = generate_report_files(session, data["today"])
             st.success(f"Report written: {xlsx_path.name}, {csv_path.name}")
+
+        # Destructive action -- own row, own confirmation, deliberately visually
+        # separated from the everyday controls above.
+        clear_col, _spacer = st.columns([1, 7])
+        if clear_col.button("🗑 CLEAR TODAY", use_container_width=True):
+            st.session_state["confirm_clear_today"] = True
+
+        if st.session_state.get("confirm_clear_today"):
+            st.warning(
+                f"⚠️ This permanently deletes today's {data['report'].calls_attempted} call record(s) "
+                f"from the local database (transcripts, outcomes, promise-to-pay dates) and resets "
+                f"today's queue back to PENDING. Your Google Sheet is **not** touched. Are you sure?"
+            )
+            dc1, dc2 = st.columns(2)
+            if dc1.button("Yes, clear today's records", key="confirm_clear_yes"):
+                try:
+                    result = clear_daily_records(session, day=data["today"])
+                    st.session_state["confirm_clear_today"] = False
+                    st.success(
+                        f"Cleared: {result['attempts_deleted']} attempt(s) deleted, "
+                        f"{result['jobs_reset']} job(s) reset, {result['consumers_reset']} consumer(s) reset."
+                    )
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(str(exc))
+            if dc2.button("Cancel", key="confirm_clear_cancel"):
+                st.session_state["confirm_clear_today"] = False
+                st.rerun()
 
         st.markdown('<div class="gsm-section-title">Today\'s Numbers</div>', unsafe_allow_html=True)
         r = data["report"]

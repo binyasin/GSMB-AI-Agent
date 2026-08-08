@@ -405,3 +405,61 @@ def run_test_call(session: Session, telephony_provider: TelephonyProvider | None
     job.state = CallState.RINGING.value
     session.commit()
     return attempt
+
+
+def clear_daily_records(session: Session, day: dt.date | None = None) -> dict:
+    """Clears today's local call records — CallAttempt rows deleted, CallJob
+    rows reset to PENDING/unlocked, and the touched Consumer rows' call-result
+    fields reset to blank/PENDING.
+
+    Deliberately **local-database-only**: never touches the Google Sheet (the
+    authoritative consumer data source) or any consumer identity/dues fields.
+    A subsequent sheet sync will simply re-populate Consumer rows from the
+    sheet as usual. Refuses to run while any of today's jobs are currently
+    locked (an attempt genuinely in flight), to avoid clearing state out from
+    under an active call.
+    """
+    from sqlalchemy import select
+
+    day = day or now_local().date()
+
+    locked = session.scalar(
+        select(CallJob).where(CallJob.job_date == day, CallJob.locked_at.isnot(None))
+    )
+    if locked is not None:
+        raise RuntimeError(
+            f"Refusing to clear: consumer_no={locked.consumer_no} has a call in progress right now."
+        )
+
+    jobs = session.query(CallJob).filter(CallJob.job_date == day).all()
+    consumer_nos = {job.consumer_no for job in jobs}
+
+    deleted_attempts = (
+        session.query(CallAttempt)
+        .filter(CallAttempt.attempt_date == day)
+        .delete(synchronize_session=False)
+    )
+
+    for job in jobs:
+        job.state = CallState.PENDING.value
+        job.attempt_count = 0
+        job.locked_at = None
+        job.locked_by = None
+
+    consumers = session.query(Consumer).filter(Consumer.consumer_no.in_(consumer_nos)).all() if consumer_nos else []
+    for consumer in consumers:
+        consumer.call_attempt = 0
+        consumer.call_status = "PENDING"
+        consumer.call_outcome = None
+        consumer.call_duration = None
+        consumer.transcript = None
+        consumer.recording_url = None
+        consumer.last_call_date = None
+        consumer.last_call_time = None
+        consumer.agent_notes = None
+        consumer.promise_to_pay_date = None
+        consumer.human_followup = False
+
+    session.commit()
+    logger.info("cleared daily records for %s: %d attempt(s) deleted, %d job(s) reset", day, deleted_attempts, len(jobs))
+    return {"attempts_deleted": deleted_attempts, "jobs_reset": len(jobs), "consumers_reset": len(consumers)}

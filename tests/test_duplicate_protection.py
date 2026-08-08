@@ -174,3 +174,66 @@ def test_missing_telephony_provider_fails_before_locking_the_job(db_session, mon
 
     attempts_created = db_session.query(CallAttempt).filter_by(consumer_no="CN-001").count()
     assert attempts_created == 0
+
+
+# ---------------------------------------------------------------------------
+# clear_daily_records
+# ---------------------------------------------------------------------------
+def test_clear_daily_records_resets_completed_attempts(db_session):
+    from app.calling_agent import clear_daily_records, create_attempt
+
+    today = dt.date.today()
+    records = GoogleSheetRepository(make_sample_worksheet()).read_rows()
+    build_daily_queue(db_session, records, job_date=today)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=today).one()
+    acquire_job_lock(db_session, job)
+    # create_attempt stamps attempt_date from now_local(), i.e. today -- matching job_date here.
+    attempt = create_attempt(db_session, job, db_session.query(Consumer).filter_by(consumer_no="CN-001").one())
+    decision = CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=today)
+    finalize_call_attempt(db_session, attempt, decision, "[]", 40, CallState.COMPLETED)
+
+    result = clear_daily_records(db_session, day=today)
+    assert result["attempts_deleted"] == 1
+    assert result["jobs_reset"] == 1
+
+    db_session.refresh(job)
+    assert job.state == CallState.PENDING.value
+    assert job.attempt_count == 0
+    assert job.locked_at is None
+
+    consumer = db_session.query(Consumer).filter_by(consumer_no="CN-001").one()
+    assert consumer.call_status == "PENDING"
+    assert consumer.call_outcome is None
+    assert consumer.transcript is None
+    assert consumer.promise_to_pay_date is None
+
+    assert db_session.query(CallAttempt).filter_by(consumer_no="CN-001").count() == 0
+
+
+def test_clear_daily_records_refuses_while_a_job_is_locked(db_session):
+    from app.calling_agent import clear_daily_records
+
+    _seed_queue(db_session)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=JOB_DATE).one()
+    acquire_job_lock(db_session, job)  # simulate an in-flight call, never finalized
+
+    with pytest.raises(RuntimeError, match="call in progress"):
+        clear_daily_records(db_session, day=JOB_DATE)
+
+    # Nothing was touched.
+    db_session.refresh(job)
+    assert job.locked_at is not None
+
+
+def test_clear_daily_records_only_affects_the_given_day(db_session):
+    from app.calling_agent import clear_daily_records
+
+    _seed_queue(db_session)
+    other_day = JOB_DATE - dt.timedelta(days=1)
+    records = GoogleSheetRepository(make_sample_worksheet()).read_rows()
+    build_daily_queue(db_session, records, job_date=other_day)
+
+    clear_daily_records(db_session, day=JOB_DATE)
+
+    other_job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=other_day).one()
+    assert other_job is not None  # untouched, different job_date

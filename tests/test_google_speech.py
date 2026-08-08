@@ -98,6 +98,32 @@ def test_run_returns_transcript_that_arrives_after_end_of_utterance_marker(mocke
     assert transcript == "hello there"
 
 
+def test_run_waits_past_multiple_interim_results_for_the_final_one(mocker):
+    """Regression test: once interim_results was turned on (2026-08-08, to
+    support the latest_transcript fallback), real Google responses started
+    including several non-final interim guesses between the
+    END_OF_SINGLE_UTTERANCE marker and the actual final result (confirmed
+    via offline replay of a real captured call). A version of this code
+    that stopped after exactly one response past the marker broke on the
+    first interim guess and returned "" every time -- the fix must keep
+    consuming responses until a result with is_final=True actually shows
+    up, not assume it's the very next message."""
+    responses = [
+        SimpleNamespace(speech_event_type=speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE, results=[]),
+        SimpleNamespace(speech_event_type=speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_EVENT_UNSPECIFIED, results=[_fake_result("he", is_final=False)]),
+        SimpleNamespace(speech_event_type=speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_EVENT_UNSPECIFIED, results=[_fake_result("hello", is_final=False)]),
+        SimpleNamespace(speech_event_type=speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_EVENT_UNSPECIFIED, results=[_fake_result("hello there", is_final=False)]),
+        SimpleNamespace(speech_event_type=speech.StreamingRecognizeResponse.SpeechEventType.SPEECH_EVENT_UNSPECIFIED, results=[_fake_result("hello there", is_final=True)]),
+    ]
+    mock_client = mocker.MagicMock()
+    mock_client.streaming_recognize.return_value = iter(responses)
+
+    session = StreamingTurnSession(mock_client, _fake_config())
+    transcript = session.run()
+
+    assert transcript == "hello there"
+
+
 def test_run_returns_empty_string_when_nothing_recognized(mocker):
     mock_client = mocker.MagicMock()
     mock_client.streaming_recognize.return_value = iter([

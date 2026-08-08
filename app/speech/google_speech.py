@@ -80,6 +80,18 @@ class GoogleSpeechClient:
     def streaming_config(self, language: SupportedLanguage):
         from google.cloud import speech
 
+        # NOTE: enable_voice_activity_events + voice_activity_timeout looked
+        # like the right fix for turns coming back empty very quickly (~1s
+        # -- Google's undocumented default speech_start_timeout gives up
+        # almost immediately if the caller doesn't start talking the
+        # instant a turn opens). Tried and reverted (2026-08-08): combined
+        # with single_utterance=True it reproducibly crashed the stream with
+        # grpc.CANCELLED against real captured call audio replayed offline,
+        # which would end a live call outright rather than degrade
+        # gracefully. Not worth that risk for an unverified fix when the
+        # interim-transcript fallback (StreamingTurnSession.latest_transcript,
+        # media_stream.py's re-prompt-on-empty-turn) already keeps a call
+        # alive through recognition misses.
         return speech.StreamingRecognitionConfig(
             config=speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.MULAW,
@@ -191,32 +203,35 @@ class StreamingTurnSession:
         """Blocking. Returns the final transcript for this utterance ("" if
         nothing was recognized before the session ended).
 
-        Google sends END_OF_SINGLE_UTTERANCE as a boundary marker on its own
-        response, with zero results -- the response actually carrying the
-        final transcript for that utterance arrives *after* it, on the very
-        next message. Breaking as soon as the marker was seen (the previous
-        behavior) discarded that trailing transcript every time, which is
-        why every live call went completely silent after the greeting
-        despite real, clearly-spoken audio reaching Google (confirmed via
-        offline replay of captured call audio 2026-08-08) -- fixed by
-        consuming exactly one more response after the marker before
-        stopping."""
-        from google.cloud import speech
-
+        Two live-call bugs found here on 2026-08-08, both via offline replay
+        of real captured call audio:
+        1. Google sends END_OF_SINGLE_UTTERANCE as a boundary marker on its
+           own response, with zero results -- the final transcript for that
+           utterance arrives *after* it. Breaking as soon as the marker was
+           seen discarded that trailing transcript every time.
+        2. Once interim_results was turned on (to support the
+           latest_transcript fallback below), *several* non-final responses
+           can arrive between the marker and the actual final one -- so
+           "consume exactly one more response after the marker" (the fix for
+           #1) started breaking on the first interim guess instead, which
+           re-broke every single turn the same way. The only thing that
+           reliably marks an utterance as actually complete is a result
+           with is_final=True itself; stop on that, not on the marker.
+        """
         transcript = ""
-        seen_end_of_utterance = False
+        got_final_result = False
         try:
             responses = self._speech_client.streaming_recognize(config=self._config, requests=self._requests())
             for response in responses:
                 for result in response.results:
                     if result.alternatives:
                         self.latest_transcript = result.alternatives[0].transcript
-                        if result.is_final:
+                    if result.is_final:
+                        got_final_result = True
+                        if result.alternatives:
                             transcript = result.alternatives[0].transcript
-                if seen_end_of_utterance:
+                if got_final_result:
                     break
-                if response.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:
-                    seen_end_of_utterance = True
         finally:
             # Guarantee the request generator can terminate even if we broke
             # out early or an exception interrupted iteration -- otherwise

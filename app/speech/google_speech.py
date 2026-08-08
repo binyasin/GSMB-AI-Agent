@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 
 from app.config import Settings, get_settings
 from app.schemas import SupportedLanguage
@@ -93,6 +94,14 @@ class GoogleSpeechClient:
                     transcript_parts.append(result.alternatives[0].transcript)
         return " ".join(transcript_parts).strip()
 
+    def open_turn_session(self, language: SupportedLanguage) -> "StreamingTurnSession":
+        """One customer utterance's worth of streaming recognition, fed
+        incrementally as Twilio Media Streams frames arrive (see
+        app/webhooks/media_stream.py). Uses single_utterance=True so
+        Google's own endpointing -- not a hand-rolled VAD -- decides when
+        the customer has stopped talking."""
+        return StreamingTurnSession(self._speech, self.streaming_config(language))
+
     def synthesize(self, text: str, language: SupportedLanguage) -> bytes:
         """Returns raw 8kHz mu-law audio bytes ready to stream back to Twilio."""
         from google.cloud import texttospeech
@@ -109,3 +118,61 @@ class GoogleSpeechClient:
             ),
         )
         return response.audio_content
+
+
+class StreamingTurnSession:
+    """Bridges an async producer (Twilio Media Streams frames, arriving one
+    at a time over a WebSocket) with Google's blocking `streaming_recognize`
+    generator, for exactly one customer utterance.
+
+    Usage: `feed()` is called from the async side as audio frames arrive;
+    `run()` is blocking (call it via `asyncio.to_thread`) and returns once
+    Google signals end-of-utterance (or `close()` is called externally,
+    e.g. because the call ended) -- whichever comes first.
+    """
+
+    def __init__(self, speech_client, streaming_config):
+        self._speech_client = speech_client
+        self._config = streaming_config
+        self._queue: queue.Queue = queue.Queue()
+        self._closed = False
+
+    def feed(self, chunk: bytes) -> None:
+        if not self._closed:
+            self._queue.put(chunk)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._queue.put(None)  # sentinel: stop the request generator
+
+    def _requests(self):
+        from google.cloud import speech
+
+        while True:
+            chunk = self._queue.get()
+            if chunk is None:
+                return
+            yield speech.StreamingRecognizeRequest(audio_content=chunk)
+
+    def run(self) -> str:
+        """Blocking. Returns the final transcript for this utterance ("" if
+        nothing was recognized before the session ended)."""
+        from google.cloud import speech
+
+        transcript = ""
+        try:
+            responses = self._speech_client.streaming_recognize(config=self._config, requests=self._requests())
+            for response in responses:
+                if response.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:
+                    break
+                for result in response.results:
+                    if result.is_final and result.alternatives:
+                        transcript = result.alternatives[0].transcript
+        finally:
+            # Guarantee the request generator can terminate even if we broke
+            # out early or an exception interrupted iteration -- otherwise
+            # the generator (and the thread running this method) could hang
+            # forever waiting on a queue nobody will ever close.
+            self.close()
+        return transcript.strip()

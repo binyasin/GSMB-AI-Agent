@@ -11,6 +11,11 @@ from app.models import Base
 from app.schemas import ALL_SHEET_COLUMNS
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 @pytest.fixture(autouse=True)
 def _clear_settings_cache(monkeypatch):
     """Isolate tests from whatever real .env happens to exist on disk.

@@ -153,6 +153,13 @@ def health():
         "google_sheets_configured": settings.has_google_credentials() and bool(settings.google_spreadsheet_id),
         "twilio_configured": bool(settings.twilio_account_sid and settings.twilio_auth_token and settings.twilio_phone_number),
         "ai_configured": bool(settings.ai_api_key),
+        "llm_fallback_order": settings.llm_fallback_order,
+        "llm_providers_configured": {
+            "anthropic": bool(settings.ai_api_key),
+            "deepseek": bool(settings.deepseek_api_key),
+            "gemini": bool(settings.gemini_api_key),
+            "openrouter": bool(settings.openrouter_api_key),
+        },
     }
 
 

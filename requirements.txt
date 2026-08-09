@@ -26,6 +26,8 @@ audioop-lts>=0.2.1; python_version >= "3.13"
 
 # --- AI / LLM (conversation NLU) ---
 anthropic>=0.40.0
+# httpx (pulled in below under Testing, and transitively by anthropic) is
+# also used directly for the DeepSeek/Gemini fallback provider calls.
 
 # --- Scheduling ---
 APScheduler>=3.11.0

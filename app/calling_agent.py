@@ -26,7 +26,7 @@ from app.conversation_engine import ConversationEngine
 from app.google_sheets import GoogleSheetRepository
 from app.models import CallAttempt, CallEvent, CallJob, Consumer
 from app.queue_manager import next_eligible_consumer
-from app.schemas import CallDecision, CallState, ConsumerRecord, CustomerIntent, SupportedLanguage
+from app.schemas import TERMINAL_STATES, CallDecision, CallState, ConsumerRecord, CustomerIntent, SupportedLanguage
 from app.telephony.base import TelephonyProvider
 from app.utils import now_local
 
@@ -302,6 +302,60 @@ def simulate_conversation(
     return engine.decision, transcript_json
 
 
+def _dial_or_simulate(
+    session: Session,
+    consumer: Consumer,
+    job: CallJob,
+    telephony_provider: TelephonyProvider | None,
+    sheet_repo: GoogleSheetRepository | None,
+) -> CallAttempt:
+    """Shared body of "place one call for this consumer's job" -- used by both
+    process_next_consumer (queue-order selection) and place_call_for_consumer
+    (a specific consumer_no, bypassing queue order; see its docstring)."""
+    settings = get_settings()
+
+    if not acquire_job_lock(session, job):
+        logger.info("job for consumer_no=%s already locked by another worker; skipping", consumer.consumer_no)
+        raise DuplicateCallError(f"call job for {consumer.consumer_no} is already locked")
+
+    attempt = create_attempt(session, job, consumer)
+    log_event(session, attempt.id, "call_attempt_created", {"consumer_no": consumer.consumer_no, "dry_run": settings.dry_run})
+
+    to_number = consumer.mobile_number
+    if settings.test_mode:
+        to_number = settings.test_phone_number
+        logger.info("TEST_MODE active: redirecting dial from %s to %s", consumer.mobile_number, to_number)
+
+    if settings.dry_run:
+        decision, transcript_json = simulate_conversation(_consumer_to_record(consumer))
+        duration = 45
+        finalize_call_attempt(
+            session, attempt, decision, transcript_json, duration, CallState.COMPLETED,
+            recording_url=None, sheet_repo=sheet_repo,
+        )
+        log_event(session, attempt.id, "dry_run_simulated", {"intent": decision.intent.value})
+        return attempt
+
+    # telephony_provider is guaranteed non-None here (checked before any job
+    # state was touched, by both callers).
+    from app.webhooks.media_stream import register_conversation
+
+    register_conversation(attempt.attempt_uid, _consumer_to_record(consumer), SupportedLanguage.URDU)
+
+    base_url = settings.public_base_url
+    voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
+    status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"
+    recording_url = f"{base_url}/webhooks/voice/recording?attempt={attempt.attempt_uid}"
+    handle = telephony_provider.make_call(to_number, voice_url, status_url, recording_url)
+    attempt.provider_call_sid = handle.provider_call_sid
+    attempt.result = CallState.RINGING.value
+    job.state = CallState.RINGING.value
+    session.commit()
+    log_event(session, attempt.id, "call_placed", {"call_sid": handle.provider_call_sid}, call_sid=handle.provider_call_sid)
+    logger.info("CALL_STARTED attempt=%s consumer_no=%s call_sid=%s", attempt.attempt_uid, consumer.consumer_no, handle.provider_call_sid)
+    return attempt
+
+
 def process_next_consumer(
     session: Session,
     telephony_provider: TelephonyProvider | None = None,
@@ -336,46 +390,47 @@ def process_next_consumer(
     if job is None:
         return None
 
-    if not acquire_job_lock(session, job):
-        logger.info("job for consumer_no=%s already locked by another worker; skipping", consumer.consumer_no)
-        raise DuplicateCallError(f"call job for {consumer.consumer_no} is already locked")
+    return _dial_or_simulate(session, consumer, job, telephony_provider, sheet_repo)
 
-    attempt = create_attempt(session, job, consumer)
-    log_event(session, attempt.id, "call_attempt_created", {"consumer_no": consumer.consumer_no, "dry_run": settings.dry_run})
 
-    to_number = consumer.mobile_number
-    if settings.test_mode:
-        to_number = settings.test_phone_number
-        logger.info("TEST_MODE active: redirecting dial from %s to %s", consumer.mobile_number, to_number)
+def place_call_for_consumer(
+    session: Session,
+    consumer_no: str,
+    telephony_provider: TelephonyProvider | None = None,
+    sheet_repo: GoogleSheetRepository | None = None,
+    job_date: dt.date | None = None,
+) -> CallAttempt | None:
+    """Places a call for one specific consumer_no's existing job today,
+    bypassing queue order entirely -- unlike process_next_consumer (which
+    always dials whichever eligible job is earliest in the queue),
+    this targets exactly the consumer_no given, useful for a manual spot
+    check/retry on one row without touching anything else in the queue.
 
-    if settings.dry_run:
-        decision, transcript_json = simulate_conversation(_consumer_to_record(consumer))
-        duration = 45
-        finalize_call_attempt(
-            session, attempt, decision, transcript_json, duration, CallState.COMPLETED,
-            recording_url=None, sheet_repo=sheet_repo,
+    The consumer must already have a non-terminal, unlocked CallJob for
+    job_date (i.e. it was included in today's build_daily_queue) -- this
+    does not create one. Returns None if no such consumer/job exists.
+    """
+    settings = get_settings()
+    job_date = job_date or now_local().date()
+
+    if not settings.dry_run and telephony_provider is None:
+        settings.require_twilio()
+        raise NotImplementedError(
+            "Live calling requires a TelephonyProvider instance (e.g. TwilioProvider) to be supplied; "
+            "none was configured for this call."
         )
-        log_event(session, attempt.id, "dry_run_simulated", {"intent": decision.intent.value})
-        return attempt
 
-    # telephony_provider is guaranteed non-None here (checked before any job
-    # state was touched, above).
-    from app.webhooks.media_stream import register_conversation
+    from sqlalchemy import select
 
-    register_conversation(attempt.attempt_uid, _consumer_to_record(consumer), SupportedLanguage.URDU)
+    consumer = session.scalar(select(Consumer).where(Consumer.consumer_no == consumer_no))
+    if consumer is None:
+        return None
 
-    base_url = settings.public_base_url
-    voice_url = f"{base_url}/webhooks/voice/incoming?attempt={attempt.attempt_uid}"
-    status_url = f"{base_url}/webhooks/voice/status?attempt={attempt.attempt_uid}"
-    recording_url = f"{base_url}/webhooks/voice/recording?attempt={attempt.attempt_uid}"
-    handle = telephony_provider.make_call(to_number, voice_url, status_url, recording_url)
-    attempt.provider_call_sid = handle.provider_call_sid
-    attempt.result = CallState.RINGING.value
-    job.state = CallState.RINGING.value
-    session.commit()
-    log_event(session, attempt.id, "call_placed", {"call_sid": handle.provider_call_sid}, call_sid=handle.provider_call_sid)
-    logger.info("CALL_STARTED attempt=%s consumer_no=%s call_sid=%s", attempt.attempt_uid, consumer.consumer_no, handle.provider_call_sid)
-    return attempt
+    job = session.scalar(select(CallJob).where(CallJob.consumer_no == consumer_no, CallJob.job_date == job_date))
+    if job is None or job.state in {s.value for s in TERMINAL_STATES}:
+        return None
+
+    return _dial_or_simulate(session, consumer, job, telephony_provider, sheet_repo)
 
 
 TEST_CONSUMER_NO = "TEST-CONSUMER"

@@ -319,5 +319,13 @@ async def media_stream(websocket: WebSocket):
         logger.exception("attempt=%s: timed out waiting on Google Speech; ending call", attempt)
     except Exception:
         logger.exception("attempt=%s: unexpected error in media stream loop; ending call", attempt)
-    finally:
-        pop_conversation(attempt)
+    # Deliberately NOT popping ACTIVE_CONVERSATIONS here. /webhooks/voice/status
+    # is the only place that finalizes a call attempt (transcript + decision ->
+    # DB + sheet), and it does its own pop_conversation() when Twilio's terminal
+    # status webhook arrives. Popping here too used to race it: this handler's
+    # `finally` always runs first (right as the AI hangs up, well before
+    # Twilio's async status callback), so the status handler's pop_conversation()
+    # always found the registry already emptied and silently fell back to an
+    # empty-transcript/generic-OTHER decision -- every call's real transcript
+    # and classified intent were being discarded, even on calls that completed
+    # a full, correct conversation end-to-end.

@@ -13,7 +13,7 @@ import datetime as dt
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
-from app.calling_agent import retry_pending_sheet_syncs, run_test_call
+from app.calling_agent import DuplicateCallError, place_call_for_consumer, retry_pending_sheet_syncs, run_test_call
 from app.config import ConfigurationError, get_settings
 from app.database import get_db
 from app.models import CallJob
@@ -145,6 +145,43 @@ def test_call(session: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
         "attempt_uid": attempt.attempt_uid,
+        "result": attempt.result,
+        "call_outcome": attempt.call_outcome,
+    }
+
+
+@router.post("/call-consumer", dependencies=[Depends(require_control_token)])
+def call_consumer(consumer_no: str, session: Session = Depends(get_db)):
+    """Manual spot-call for one specific consumer_no's existing job today --
+    bypasses queue order entirely (unlike /campaign/start, which lets the
+    scheduler work through the whole queue in order). Must be run through
+    this endpoint rather than a standalone script: register_conversation()
+    populates an in-process registry that only this running app's own
+    /webhooks/voice/media-stream handler can see."""
+    settings = get_settings()
+    telephony_provider = None
+    if not settings.dry_run:
+        try:
+            settings.require_twilio()
+        except ConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        from app.telephony.twilio_provider import TwilioProvider
+
+        telephony_provider = TwilioProvider(settings)
+
+    try:
+        attempt = place_call_for_consumer(session, consumer_no, telephony_provider=telephony_provider)
+    except DuplicateCallError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if attempt is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no eligible job for consumer_no={consumer_no!r} today (not in queue, already terminal, or unknown consumer)",
+        )
+    return {
+        "attempt_uid": attempt.attempt_uid,
+        "consumer_no": consumer_no,
         "result": attempt.result,
         "call_outcome": attempt.call_outcome,
     }

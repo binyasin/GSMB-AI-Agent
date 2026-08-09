@@ -16,12 +16,50 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from enum import StrEnum
 
-from app.config import get_settings
+from app.config import ConfigurationError, get_settings
 from app.schemas import CallDecision, ConsumerRecord, CustomerIntent, SupportedLanguage, TranscriptTurn
+from app.utils import normalize_pakistani_mobile
 
 logger = logging.getLogger("calls")
+
+_PHONE_CANDIDATE_RE = re.compile(r"\d[\d\s\-]{8,14}\d")
+
+
+def _extract_phone_number(text: str) -> str | None:
+    """Deterministic (non-LLM) Pakistani mobile number extraction -- scans
+    for digit-like substrings of plausible phone-number length and validates
+    each with the same normalizer already used for sheet/DB numbers, rather
+    than trusting an LLM to transcribe digits reliably (spec 2026-08-09:
+    ALTERNATE_OWNER_CONTACT / PAYMENT_CONTACT_NUMBER capture)."""
+    for candidate in _PHONE_CANDIDATE_RE.findall(text):
+        normalized = normalize_pakistani_mobile(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+_AFFIRM_PHRASES = ("yes", "yeah", "yep", "sure", "ji han", "ji haan", "haan", "bilkul", "sahi hai", "theek hai", "correct")
+_DENY_PHRASES = ("no ", "no,", "no.", "nahi", "nahin", "galat hai", "wrong", "not correct", "sahi nahi")
+
+
+def _is_affirmative(text: str) -> bool | None:
+    """Lightweight bilingual yes/no heuristic for pure procedural
+    confirmation turns (address confirmation, installment interest) -- these
+    are meta-conversation yes/no questions the general-purpose intent
+    classifier isn't well-suited to represent, so a direct phrase check
+    (matching the pattern keyword_fallback_classifier already uses for
+    identity-verification yes/no) is more reliable than routing through
+    CustomerIntent alone. Returns None (ambiguous) rather than guessing when
+    neither list matches."""
+    t = f" {text.lower()} "
+    if any(p in t for p in _DENY_PHRASES):
+        return False
+    if any(p in t for p in _AFFIRM_PHRASES):
+        return True
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -225,17 +263,108 @@ def not_my_account_followup_question_line(language: SupportedLanguage) -> str:
     return "Would you like to verify the account details?"
 
 
-def not_my_address_line(language: SupportedLanguage) -> str:
+def address_confirmation_question_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
+    """Spec 2026-08-09 Address Rule: on a wrong-address claim, never
+    disconnect -- first read back the plot/house/address on record and ask
+    the customer to confirm it, since a hasty or mis-transcribed "not my
+    address" shouldn't immediately escalate to asking for someone else's
+    contact details."""
+    address = consumer.address
+    if language == SupportedLanguage.URDU:
+        if address:
+            return f"Hamare record ke mutabiq is account ka pata/plot ye hai: {address}. Kya ye aap ka mojooda ghar ya plot hai?"
+        return "Kya aap barah-e-karam is account ka registered plot ya ghar number confirm kar sakte hain?"
+    if address:
+        return f"According to our record, this account's registered address/plot is: {address}. Is this your current house or plot?"
+    return "Could you please confirm the plot or house number registered against this account?"
+
+
+def alternate_contact_request_line(language: SupportedLanguage) -> str:
+    """Exact wording specified by the user (2026-08-09) for when the customer
+    still denies the address after confirmation -- asks for the actual
+    owner/current occupant's contact instead of disconnecting or making any
+    threat/legal claim."""
     if language == SupportedLanguage.URDU:
         return (
-            "Batane ka shukriya. Is soorat mein, account ki maloomat update ya verify honi chahiye. Barah-e-karam "
-            "KE customer service se raabta karke occupancy ya address ki tabdeeli report karein aur account "
-            "details check karwa lein."
+            "جی، ہمارے ریکارڈ کے مطابق اس موجودہ پلاٹ/گھر نمبر پر KE کے واجبات موجود ہیں۔ ہم ان واجبات کی ادائیگی کے "
+            "لیے متعلقہ مالک یا موجودہ صارف سے رابطہ کرنا چاہتے ہیں۔ اگر آپ کے پاس اصل مالک یا موجودہ صارف کا رابطہ "
+            "نمبر ہے تو براہِ کرم فراہم کر دیں۔"
         )
     return (
-        "Thank you for informing me. In that case, the account information may need to be updated or verified. "
-        "Please contact KE customer service to report the change of occupancy or address and have the account "
-        "details checked."
+        "I understand. According to our record, K-Electric dues exist against this current plot/house number. "
+        "We would like to contact the relevant owner or current occupant to settle these dues. If you have a "
+        "contact number for the actual owner or current occupant, please share it with us."
+    )
+
+
+def alternate_contact_saved_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Shukriya, hum ne ye number note kar liya hai. Hamara numainda un se raabta karega."
+    return "Thank you, we've noted that number. Our representative will reach out to them."
+
+
+def alternate_contact_not_provided_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Theek hai, koi baat nahin. Hum apne mojooda record ke mutabiq is maamle ko age follow-up ke liye bhej rahe hain."
+    return "That's alright. We'll proceed with this matter for follow-up based on our existing record."
+
+
+def installment_offer_question_line(language: SupportedLanguage) -> str:
+    """Exact wording specified by the user (2026-08-09) -- spoken ONLY after
+    the customer says they cannot pay the full amount; never mentioned
+    proactively (spec 2026-08-09 Dues & Installment Logic)."""
+    if language == SupportedLanguage.URDU:
+        return (
+            "جی، میں آپ کی بات سمجھ رہا ہوں۔ ہمارے پاس scheme/installment کا option بھی موجود ہے۔ آپ اس کے بارے میں "
+            "کیا خیال رکھتے ہیں؟"
+        )
+    return (
+        "I understand your situation. We also have a scheme/installment option available. What are your thoughts "
+        "on that?"
+    )
+
+
+def installment_declined_closing_line(language: SupportedLanguage) -> str:
+    if language == SupportedLanguage.URDU:
+        return "Theek hai, samajh gayi. Waqt dene ka shukriya. Allah Hafiz."
+    return "Understood. Thank you for your time. Goodbye."
+
+
+def payment_contact_confirm_question_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
+    number = consumer.mobile_number
+    if language == SupportedLanguage.URDU:
+        if number:
+            return f"Theek hai. Kya hum installment ki tafseel is number par bhej dein: {number}? Ya koi aur number dena chahenge?"
+        return "Theek hai. Barah-e-karam wo number bata dein jis par hum installment ki tafseel bhej sakein."
+    if number:
+        return f"Alright. Shall we send the installment details to this number: {number}? Or would you like to provide a different number?"
+    return "Alright. Please share the number where we can send the installment details."
+
+
+def payment_contact_saved_line(number: str | None, language: SupportedLanguage) -> str:
+    """Never invents installment amounts/terms -- only confirms where the
+    (separately, already-approved) details will be sent, with the nearest-KE
+    -Customer-Service-Centre fallback per spec 2026-08-09 when PDF delivery
+    isn't available."""
+    if language == SupportedLanguage.URDU:
+        if number:
+            return (
+                f"Shukriya. Hum installment/bill ki PDF {number} par bhejne ki koshish karein ge. Agar PDF na milay "
+                "to barah-e-karam apne qareeb tareen KE Customer Service Centre se installment ki tafseelat hasil "
+                "kar ke payment kar dein."
+            )
+        return (
+            "Theek hai. Barah-e-karam apne qareeb tareen KE Customer Service Centre se installment ki tafseelat "
+            "hasil kar ke payment kar dein."
+        )
+    if number:
+        return (
+            f"Thank you. We'll try to send the installment/bill PDF to {number}. If it doesn't arrive, please "
+            "obtain the installment details from your nearest KE Customer Service Centre and make the payment there."
+        )
+    return (
+        "Alright. Please obtain the installment details from your nearest KE Customer Service Centre and make the "
+        "payment there."
     )
 
 
@@ -297,8 +426,10 @@ _CLOSING_BY_INTENT = {
     CustomerIntent.INSTALLMENT_REQUEST: installment_request_line,
     CustomerIntent.REFUSES_TO_PAY: refuses_to_pay_line,
     CustomerIntent.NOT_MY_ACCOUNT: not_my_account_line,
-    CustomerIntent.NOT_MY_ADDRESS: not_my_address_line,
     CustomerIntent.COMPLAINT_NOT_ADDRESSED: complaint_not_addressed_line,
+    # NOT_MY_ADDRESS deliberately absent: it gets its own dedicated
+    # confirm-then-escalate flow (_handle_address_confirmation /
+    # _handle_alternate_contact), not a single ack+question+close.
 }
 
 # Intents that must ask a follow-up question and LISTEN before closing,
@@ -312,7 +443,6 @@ _FOLLOWUP_QUESTION_BY_INTENT = {
     CustomerIntent.INSTALLMENT_REQUEST: anything_else_question_line,
     CustomerIntent.REFUSES_TO_PAY: refuses_to_pay_followup_question_line,
     CustomerIntent.NOT_MY_ACCOUNT: not_my_account_followup_question_line,
-    CustomerIntent.NOT_MY_ADDRESS: anything_else_question_line,
     CustomerIntent.COMPLAINT_NOT_ADDRESSED: complaint_reference_question_line,
 }
 
@@ -350,6 +480,8 @@ class ClassificationStage(StrEnum):
     MAIN_RESPONSE = "MAIN_RESPONSE"
     PROMISE_DATE = "PROMISE_DATE"
     FOLLOWUP = "FOLLOWUP"
+    ADDRESS_CONFIRMATION = "ADDRESS_CONFIRMATION"
+    INSTALLMENT_INTEREST = "INSTALLMENT_INTEREST"
 
 
 _SYSTEM_PROMPT_TEMPLATE = """You are the NLU component of an AI recovery-calling agent for GSM Brothers, \
@@ -376,11 +508,27 @@ their own words in `notes` instead.
 - Set human_followup=true for: disputes, installment requests, "already paid" claims, requests for a human, \
 NOT_MY_ACCOUNT, NOT_MY_ADDRESS, COMPLAINT_NOT_ADDRESSED, or anything you are not confident about.
 - Set do_not_call=true only if the customer explicitly asked not to be called again.
+- Never set alternate_owner_contact or payment_contact_number yourself -- leave both null. They're filled in by \
+the system elsewhere from the transcript directly, not by you.
 - If the utterance raises a second, genuinely distinct concern alongside the primary one (e.g. "I already paid \
 AND my complaint hasn't been resolved"), set secondary_intent to that second concern's category. Only use this \
 for a real second concern, not a restatement of the same one.
 - Set customer_angry=true if the tone is hostile, frustrated, or raised -- independent of which category the \
 content falls into.
+- verification_passed only matters at the VERIFY_IDENTITY stage, right after the agent asked whether it's \
+speaking with the named consumer -- setting it to false immediately ends the call (verification-failed line, no \
+further conversation), so it is a high-cost, one-way decision. Set verification_passed=false ONLY if the customer \
+explicitly said this is the wrong person / wrong number / not them. For anything else at that stage -- "yes", a \
+garbled or partial transcript, filler words, an unrelated or unclear utterance, or literally any response that \
+isn't an explicit wrong-person/wrong-number denial -- set verification_passed=true and let the call continue; a \
+transcription error should never be treated as proof the wrong person answered.
+- At the ADDRESS_CONFIRMATION stage (the agent just read back the address/plot on record and asked the customer \
+to confirm it, after they first claimed it wasn't their address): set intent=NOT_MY_ADDRESS ONLY if the customer \
+still explicitly denies it's their address/plot. Anything else -- confirmation, an unclear or garbled response, \
+silence-filler words -- set intent=OTHER, since a mis-transcription should never be treated as a second denial.
+- At the INSTALLMENT_INTEREST stage (the agent just asked whether the customer wants the installment/scheme \
+option, after the customer said they can't pay the full amount): set intent=INSTALLMENT_REQUEST if they want it; \
+REFUSES_TO_PAY or NOT_INTERESTED if they explicitly decline; OTHER if unclear.
 - Current conversation stage: {stage}
 """
 
@@ -392,8 +540,72 @@ def _build_anthropic_client(settings):
     return Anthropic(api_key=settings.ai_api_key)
 
 
+def _resolve_refs(node, defs: dict):
+    """Inline pydantic's `$ref: "#/$defs/X"` schema references. DeepSeek's
+    OpenAI-compatible function calling tolerates raw pydantic JSON Schema
+    ($defs/$ref/anyOf) the same way Anthropic does, but Gemini's function
+    schema (an OpenAPI-3.0 subset) doesn't resolve $ref at all -- it has to
+    be inlined before `_to_gemini_schema` can touch it."""
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref_name = node["$ref"].rsplit("/", 1)[-1]
+            resolved = _resolve_refs(defs[ref_name], defs)
+            overrides = {k: v for k, v in node.items() if k != "$ref"}
+            return {**resolved, **overrides}
+        return {k: _resolve_refs(v, defs) for k, v in node.items() if k != "$defs"}
+    if isinstance(node, list):
+        return [_resolve_refs(v, defs) for v in node]
+    return node
+
+
+def _to_gemini_schema(schema: dict) -> dict:
+    """Best-effort translation of CallDecision's pydantic JSON Schema into
+    Gemini's function-parameter schema: inline $defs/$ref (Gemini can't
+    resolve them), collapse pydantic's `anyOf: [T, {type: null}]` "optional"
+    pattern into `nullable: true`, and uppercase JSON Schema type names to
+    Gemini's OpenAPI Type enum (STRING/OBJECT/...). Not a general-purpose
+    JSON Schema -> OpenAPI converter -- only handles the shapes pydantic
+    actually emits for this one model."""
+
+    def convert(node):
+        if not isinstance(node, dict):
+            return node
+        node = dict(node)
+        node.pop("title", None)
+        node.pop("format", None)
+        any_of = node.pop("anyOf", None)
+        if any_of is not None:
+            non_null = [o for o in any_of if o.get("type") != "null"]
+            nullable = len(non_null) != len(any_of)
+            if len(non_null) == 1:
+                converted = convert(non_null[0])
+                if nullable:
+                    converted["nullable"] = True
+                return converted
+            node["oneOf"] = [convert(o) for o in non_null]
+        if "type" in node:
+            node["type"] = node["type"].upper()
+        elif "enum" in node:
+            node["type"] = "STRING"
+        if node.get("type") == "OBJECT" and "properties" in node:
+            node["properties"] = {k: convert(v) for k, v in node["properties"].items()}
+        if node.get("type") == "ARRAY" and "items" in node:
+            node["items"] = convert(node["items"])
+        return node
+
+    defs = schema.get("$defs", {})
+    return convert(_resolve_refs(schema, defs))
+
+
 def _sanitize_decision(decision: CallDecision, utterance: str) -> CallDecision:
-    """Defensive guard against a fabricated promise-to-pay date."""
+    """Defensive guard against a fabricated promise-to-pay date, and against
+    the LLM ever populating alternate_owner_contact/payment_contact_number
+    itself -- those two fields exist on CallDecision (and therefore in every
+    provider's tool schema) only so the engine can carry a value it already
+    extracted deterministically via _extract_phone_number(); nulling them
+    here on every classifier response, regardless of stage, means a model
+    that decides to "helpfully" fill one in on an unrelated turn can never
+    leak a hallucinated number into a saved call record."""
     relative_intents = {
         CustomerIntent.WILL_PAY_TODAY,
         CustomerIntent.WILL_PAY_TOMORROW,
@@ -406,6 +618,8 @@ def _sanitize_decision(decision: CallDecision, utterance: str) -> CallDecision:
         )
         if decision.intent not in relative_intents and not has_digit and not has_relative_word:
             decision = decision.model_copy(update={"promise_to_pay_date": None})
+    if decision.alternate_owner_contact is not None or decision.payment_contact_number is not None:
+        decision = decision.model_copy(update={"alternate_owner_contact": None, "payment_contact_number": None})
     return decision
 
 
@@ -465,21 +679,236 @@ def classify_with_llm(
     )
 
 
-def _llm_classifier_with_fallback(
-    stage: ClassificationStage, consumer: ConsumerRecord, utterance: str, history: list[TranscriptTurn] | None = None
+def _no_tool_call_decision(provider: str, stage: ClassificationStage) -> CallDecision:
+    logger.warning("%s returned no tool/function call for stage=%s", provider, stage.value)
+    return CallDecision(
+        intent=CustomerIntent.OTHER,
+        human_followup=True,
+        notes="LLM returned no classification; routed to human review.",
+    )
+
+
+def _invalid_payload_decision(provider: str, payload) -> CallDecision:
+    logger.exception("%s returned an invalid CallDecision payload: %r", provider, payload)
+    return CallDecision(
+        intent=CustomerIntent.OTHER,
+        human_followup=True,
+        notes="LLM output failed schema validation; routed to human review.",
+    )
+
+
+def _classify_with_openai_compatible(
+    provider_name: str,
+    base_url: str,
+    api_key: str,
+    model: str,
+    stage: ClassificationStage,
+    utterance: str,
+    history: list[TranscriptTurn],
+    extra_headers: dict | None = None,
 ) -> CallDecision:
-    """Wraps classify_with_llm so a live call keeps going even if the LLM
-    call itself fails (API outage, rate limit, or -- the case that prompted
-    this, 2026-08-08 -- an Anthropic account with an expired/zero credit
-    balance): classify_with_llm has no try/except of its own around the
-    network call, so an error there would otherwise propagate up and end
-    the call mid-conversation. Falls back to the same offline classifier
-    used when no AI_API_KEY is configured at all."""
+    """Shared body for any provider that speaks the OpenAI chat/completions +
+    tool-calling wire format -- DeepSeek and OpenRouter both do, and it
+    accepts the same raw pydantic JSON Schema Anthropic does (no $ref
+    inlining needed, unlike Gemini)."""
+    import httpx
+
+    schema = CallDecision.model_json_schema()
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(stage=stage.value)
+    transcript_text = "\n".join(f"{t.speaker}: {t.message}" for t in history)
+
+    response = httpx.post(
+        base_url,
+        headers={"Authorization": f"Bearer {api_key}", **(extra_headers or {})},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Conversation so far:\n{transcript_text}\n\nLatest customer utterance: {utterance!r}",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "classify_customer_response",
+                        "description": "Structured classification of the customer's utterance.",
+                        "parameters": schema,
+                    },
+                }
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "classify_customer_response"}},
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    tool_calls = response.json()["choices"][0]["message"].get("tool_calls") or []
+    if not tool_calls:
+        return _no_tool_call_decision(provider_name, stage)
+
+    import json as _json
+
+    raw_arguments = tool_calls[0]["function"]["arguments"]
     try:
-        return classify_with_llm(stage, consumer, utterance, history)
+        decision = CallDecision.model_validate(_json.loads(raw_arguments))
     except Exception:
-        logger.exception("classify_with_llm failed; falling back to keyword_fallback_classifier for this turn")
-        return keyword_fallback_classifier(stage, consumer, utterance, history)
+        return _invalid_payload_decision(provider_name, raw_arguments)
+    return _sanitize_decision(decision, utterance)
+
+
+def _classify_with_deepseek(
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None = None,
+    settings=None,
+) -> CallDecision:
+    settings = settings or get_settings()
+    settings.require_deepseek()
+    return _classify_with_openai_compatible(
+        "DeepSeek", "https://api.deepseek.com/chat/completions", settings.deepseek_api_key,
+        settings.deepseek_model, stage, utterance, history or [],
+    )
+
+
+def _classify_with_openrouter(
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None = None,
+    settings=None,
+) -> CallDecision:
+    settings = settings or get_settings()
+    settings.require_openrouter()
+    return _classify_with_openai_compatible(
+        "OpenRouter", "https://openrouter.ai/api/v1/chat/completions", settings.openrouter_api_key,
+        settings.openrouter_model, stage, utterance, history or [],
+        extra_headers={"HTTP-Referer": "https://gsmbrothers.local", "X-Title": "GSM Brothers AI Recovery Agent"},
+    )
+
+
+def _classify_with_gemini(
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None = None,
+    settings=None,
+) -> CallDecision:
+    settings = settings or get_settings()
+    settings.require_gemini()
+    import httpx
+
+    history = history or []
+    schema = _to_gemini_schema(CallDecision.model_json_schema())
+    system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(stage=stage.value)
+    transcript_text = "\n".join(f"{t.speaker}: {t.message}" for t in history)
+    user_text = f"Conversation so far:\n{transcript_text}\n\nLatest customer utterance: {utterance!r}"
+
+    response = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
+        params={"key": settings.gemini_api_key},
+        json={
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            "tools": [
+                {
+                    "function_declarations": [
+                        {
+                            "name": "classify_customer_response",
+                            "description": "Structured classification of the customer's utterance.",
+                            "parameters": schema,
+                        }
+                    ]
+                }
+            ],
+            "tool_config": {
+                "function_calling_config": {"mode": "ANY", "allowed_function_names": ["classify_customer_response"]}
+            },
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    candidates = response.json().get("candidates") or []
+    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+    for part in parts:
+        if "functionCall" in part:
+            args = part["functionCall"].get("args", {})
+            try:
+                decision = CallDecision.model_validate(args)
+            except Exception:
+                return _invalid_payload_decision("Gemini", args)
+            return _sanitize_decision(decision, utterance)
+    return _no_tool_call_decision("Gemini", stage)
+
+
+_PROVIDER_KEY_ATTR = {
+    "anthropic": "ai_api_key",
+    "deepseek": "deepseek_api_key",
+    "gemini": "gemini_api_key",
+    "openrouter": "openrouter_api_key",
+}
+
+
+def _classify_with_provider(
+    provider: str,
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None,
+    settings,
+) -> CallDecision:
+    # Dispatches by looking up the module-global name at call time (rather
+    # than a dict built from these functions' identities at import time) so
+    # that `mocker.patch("app.conversation_engine.classify_with_llm", ...)`
+    # style test patches actually take effect here, same as everywhere else
+    # in this module.
+    if provider == "anthropic":
+        return classify_with_llm(stage, consumer, utterance, history, settings=settings)
+    if provider == "deepseek":
+        return _classify_with_deepseek(stage, consumer, utterance, history, settings=settings)
+    if provider == "gemini":
+        return _classify_with_gemini(stage, consumer, utterance, history, settings=settings)
+    if provider == "openrouter":
+        return _classify_with_openrouter(stage, consumer, utterance, history, settings=settings)
+    raise ConfigurationError(f"unknown LLM provider {provider!r} in LLM_FALLBACK_ORDER")
+
+
+def _llm_classifier_with_fallback(
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None = None,
+    settings=None,
+) -> CallDecision:
+    """Tries each configured provider in settings.LLM_FALLBACK_ORDER before
+    giving up and degrading to the offline keyword classifier for this turn.
+
+    Originally this only wrapped classify_with_llm (Anthropic) -- added
+    2026-08-08 after a live call hit an Anthropic account with a zero credit
+    balance mid-conversation, so a network/API failure never propagates up
+    and ends the call. Extended the same day to also try DeepSeek and
+    Gemini as configured backups before falling all the way back to
+    keywords, rather than degrading straight to keyword matching the moment
+    Anthropic alone has a bad day."""
+    settings = settings or get_settings()
+    order = [p.strip().lower() for p in settings.llm_fallback_order.split(",") if p.strip()]
+
+    for provider in order:
+        key_attr = _PROVIDER_KEY_ATTR.get(provider)
+        if key_attr is None:
+            logger.warning("unknown provider %r in LLM_FALLBACK_ORDER; skipping", provider)
+            continue
+        if not getattr(settings, key_attr):
+            continue
+        try:
+            return _classify_with_provider(provider, stage, consumer, utterance, history, settings)
+        except Exception:
+            logger.exception("%s classifier failed for stage=%s; trying next provider", provider, stage.value)
+
+    logger.error("no configured LLM provider succeeded; falling back to keyword_fallback_classifier for this turn")
+    return keyword_fallback_classifier(stage, consumer, utterance, history)
 
 
 _DATE_HINT_WORDS = (
@@ -568,6 +997,10 @@ class ConversationStage(StrEnum):
     AWAITING_MAIN_RESPONSE = "AWAITING_MAIN_RESPONSE"
     AWAITING_PROMISE_DATE = "AWAITING_PROMISE_DATE"
     AWAITING_FOLLOWUP = "AWAITING_FOLLOWUP"
+    AWAITING_ADDRESS_CONFIRMATION = "AWAITING_ADDRESS_CONFIRMATION"
+    AWAITING_ALTERNATE_CONTACT = "AWAITING_ALTERNATE_CONTACT"
+    AWAITING_INSTALLMENT_INTEREST = "AWAITING_INSTALLMENT_INTEREST"
+    AWAITING_PAYMENT_CONTACT = "AWAITING_PAYMENT_CONTACT"
     ENDED = "ENDED"
 
 
@@ -595,9 +1028,12 @@ class ConversationEngine:
     @staticmethod
     def _default_classifier():
         settings = get_settings()
-        if settings.ai_api_key:
+        if any(getattr(settings, attr) for attr in _PROVIDER_KEY_ATTR.values()):
             return _llm_classifier_with_fallback
-        logger.warning("AI_API_KEY not configured; using offline keyword_fallback_classifier (not for production)")
+        logger.warning(
+            "No LLM provider configured (AI_API_KEY/DEEPSEEK_API_KEY/GEMINI_API_KEY/OPENROUTER_API_KEY); "
+            "using offline keyword_fallback_classifier (not for production)"
+        )
         return keyword_fallback_classifier
 
     def _log(self, speaker: str, message: str) -> None:
@@ -626,6 +1062,14 @@ class ConversationEngine:
             line = self._handle_promise_date(utterance)
         elif self.stage == ConversationStage.AWAITING_FOLLOWUP:
             line = self._handle_followup(utterance)
+        elif self.stage == ConversationStage.AWAITING_ADDRESS_CONFIRMATION:
+            line = self._handle_address_confirmation(utterance)
+        elif self.stage == ConversationStage.AWAITING_ALTERNATE_CONTACT:
+            line = self._handle_alternate_contact(utterance)
+        elif self.stage == ConversationStage.AWAITING_INSTALLMENT_INTEREST:
+            line = self._handle_installment_interest(utterance)
+        elif self.stage == ConversationStage.AWAITING_PAYMENT_CONTACT:
+            line = self._handle_payment_contact(utterance)
         else:
             line = ""
 
@@ -694,6 +1138,22 @@ class ConversationEngine:
             self.stage = ConversationStage.AWAITING_PROMISE_DATE
             return self._apply_tone(promise_date_question_line(self.language), decision)
 
+        # NOT_MY_ADDRESS gets its own confirm-then-escalate flow (spec
+        # 2026-08-09 Address Rule) rather than the generic ack+question+close
+        # pattern -- a hasty or mis-transcribed claim shouldn't immediately
+        # jump to asking for someone else's contact details.
+        if decision.intent == CustomerIntent.NOT_MY_ADDRESS:
+            self.stage = ConversationStage.AWAITING_ADDRESS_CONFIRMATION
+            return self._apply_tone(address_confirmation_question_line(self.consumer, self.language), decision)
+
+        # Installment is only ever offered after the customer says they
+        # can't pay -- never proactively (spec 2026-08-09 Dues & Installment
+        # Logic) -- so NEEDS_MORE_TIME gets its own offer-then-confirm flow
+        # instead of the generic ack+question+close pattern.
+        if decision.intent == CustomerIntent.NEEDS_MORE_TIME:
+            self.stage = ConversationStage.AWAITING_INSTALLMENT_INTEREST
+            return self._apply_tone(installment_offer_question_line(self.language), decision)
+
         followup_question = _FOLLOWUP_QUESTION_BY_INTENT.get(decision.intent)
         if followup_question is not None:
             self._pending_followup_intent = decision.intent
@@ -745,3 +1205,74 @@ class ConversationEngine:
             return dnc_ack_line(self.language)
         self.stage = ConversationStage.ENDED
         return self._apply_tone(closing_line(self.language), decision)
+
+    def _handle_address_confirmation(self, utterance: str) -> str:
+        """Response to "our record shows plot/address X, is that where you
+        are?" (spec 2026-08-09 Address Rule). Only an explicit second denial
+        escalates to asking for someone else's contact -- the classification
+        prompt for ADDRESS_CONFIRMATION already treats confirmation, silence
+        filler, or a garbled/unclear response as intent=OTHER, never a
+        second NOT_MY_ADDRESS, so a transcription hiccup can't accidentally
+        trigger the escalation."""
+        decision = self._classifier(ClassificationStage.ADDRESS_CONFIRMATION, self.consumer, utterance, self.transcript)
+        self.decision = decision
+
+        if decision.do_not_call:
+            self.stage = ConversationStage.ENDED
+            return dnc_ack_line(self.language)
+
+        if decision.intent == CustomerIntent.NOT_MY_ADDRESS:
+            self.stage = ConversationStage.AWAITING_ALTERNATE_CONTACT
+            return self._apply_tone(alternate_contact_request_line(self.language), decision)
+
+        # Confirmed (or unclear) -- resume the normal conversation rather
+        # than treating a mis-transcription as a second denial.
+        self.stage = ConversationStage.AWAITING_MAIN_RESPONSE
+        return self._apply_tone(main_question_line(self.language), decision)
+
+    def _handle_alternate_contact(self, utterance: str) -> str:
+        """Deterministic, no LLM call -- capturing a phone number correctly
+        is a job for the same normalizer already used on sheet/DB numbers,
+        not something to trust an LLM's transcription-of-digits to get
+        right (see _extract_phone_number)."""
+        phone = _extract_phone_number(utterance)
+        self.stage = ConversationStage.ENDED
+        if phone:
+            self.decision = self.decision.model_copy(update={"alternate_owner_contact": phone})
+            return self._apply_tone(alternate_contact_saved_line(self.language), self.decision)
+        return self._apply_tone(alternate_contact_not_provided_line(self.language), self.decision)
+
+    def _handle_installment_interest(self, utterance: str) -> str:
+        """Response to "we also have an installment option, interested?" --
+        only reached after the customer already said they can't pay (spec
+        2026-08-09 Dues & Installment Logic: never offered proactively)."""
+        decision = self._classifier(ClassificationStage.INSTALLMENT_INTEREST, self.consumer, utterance, self.transcript)
+        self.decision = decision
+
+        if decision.do_not_call:
+            self.stage = ConversationStage.ENDED
+            return dnc_ack_line(self.language)
+
+        if decision.intent == CustomerIntent.INSTALLMENT_REQUEST:
+            self.stage = ConversationStage.AWAITING_PAYMENT_CONTACT
+            return self._apply_tone(payment_contact_confirm_question_line(self.consumer, self.language), decision)
+
+        if decision.intent in (CustomerIntent.REFUSES_TO_PAY, CustomerIntent.NOT_INTERESTED):
+            self.stage = ConversationStage.ENDED
+            return self._apply_tone(installment_declined_closing_line(self.language), decision)
+
+        # Unclear -- don't assume consent; close politely via the generic path.
+        self.stage = ConversationStage.ENDED
+        return self._apply_tone(closing_line_for_intent(decision, self.language), decision)
+
+    def _handle_payment_contact(self, utterance: str) -> str:
+        """Deterministic, no LLM call -- same reasoning as
+        _handle_alternate_contact. An affirmative with no new number given
+        means "yes, send it to the number you already called me on"."""
+        phone = _extract_phone_number(utterance)
+        if phone is None and _is_affirmative(utterance) is True:
+            phone = self.consumer.mobile_number
+        self.stage = ConversationStage.ENDED
+        if phone:
+            self.decision = self.decision.model_copy(update={"payment_contact_number": phone})
+        return self._apply_tone(payment_contact_saved_line(phone, self.language), self.decision)

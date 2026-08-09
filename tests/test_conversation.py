@@ -199,8 +199,9 @@ def _classifier_for(main_response_decision: CallDecision):
         (CustomerIntent.INSTALLMENT_REQUEST, "anything else"),
         (CustomerIntent.REFUSES_TO_PAY, "reviewed"),
         (CustomerIntent.NOT_MY_ACCOUNT, "verify"),
-        (CustomerIntent.NOT_MY_ADDRESS, "anything else"),
         (CustomerIntent.COMPLAINT_NOT_ADDRESSED, "reference"),
+        # NOT_MY_ADDRESS deliberately absent: it has its own dedicated
+        # confirm-then-escalate flow, see the ADDRESS_CONFIRMATION tests below.
     ],
 )
 def test_followup_intents_ask_a_question_and_do_not_end_the_call(intent, expected_phrase):
@@ -215,6 +216,171 @@ def test_followup_intents_ask_a_question_and_do_not_end_the_call(intent, expecte
 
     assert engine.stage == ConversationStage.AWAITING_FOLLOWUP
     assert expected_phrase in line.lower()
+
+
+# ---------------------------------------------------------------------------
+# NOT_MY_ADDRESS: confirm-then-escalate flow (spec 2026-08-09 Address Rule)
+# ---------------------------------------------------------------------------
+def _classifier_sequence(*decisions):
+    """Returns a fake classifier yielding each decision in order, one per
+    call (VERIFY_IDENTITY always first). Lets a test drive a multi-stage
+    conversation without hand-writing an if/elif per stage."""
+    remaining = list(decisions)
+
+    def classifier(stage, consumer, utterance, history):
+        return remaining.pop(0)
+
+    return classifier
+
+
+def test_address_denial_asks_to_confirm_before_escalating():
+    """The very first denial must never jump straight to asking for someone
+    else's contact -- it reads back the address on record and asks the
+    customer to confirm, in case the claim was hasty or mis-transcribed."""
+    consumer = _consumer(address="House 12, Street 4, Karachi")
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("This isn't my house")
+
+    assert engine.stage == ConversationStage.AWAITING_ADDRESS_CONFIRMATION
+    assert "House 12, Street 4, Karachi" in line
+
+
+def test_address_confirmed_resumes_normal_conversation():
+    """A mis-transcription or actual confirmation at this stage must never
+    be treated as a second denial -- it resumes the normal flow instead of
+    escalating."""
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),
+            CallDecision(intent=CustomerIntent.OTHER),  # confirms it IS their address
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("This isn't my house")
+    line = engine.respond("Oh wait, actually yes it is")
+
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE
+    assert engine.decision.intent != CustomerIntent.NOT_MY_ADDRESS
+
+
+def test_address_still_denied_asks_for_alternate_contact_then_saves_it():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),  # still denies
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("This isn't my house")
+    line = engine.respond("No, definitely not, wrong address")
+
+    assert engine.stage == ConversationStage.AWAITING_ALTERNATE_CONTACT
+    assert "contact" in line.lower() or "owner" in line.lower()
+
+    line2 = engine.respond("You can reach the owner at 0300-1234567")
+    assert engine.stage == ConversationStage.ENDED
+    assert engine.decision.alternate_owner_contact is not None
+    assert "note" in line2.lower() or "thank" in line2.lower()
+
+
+def test_alternate_contact_not_given_still_ends_gracefully():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),
+            CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("This isn't my house")
+    engine.respond("Not sure, wrong address")
+    line = engine.respond("I don't have their number")
+
+    assert engine.stage == ConversationStage.ENDED
+    assert engine.decision.alternate_owner_contact is None
+
+
+# ---------------------------------------------------------------------------
+# NEEDS_MORE_TIME: installment offered only after "can't pay" (spec
+# 2026-08-09 Dues & Installment Logic)
+# ---------------------------------------------------------------------------
+def test_installment_only_offered_after_cannot_pay():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("I don't have the money right now")
+
+    assert engine.stage == ConversationStage.AWAITING_INSTALLMENT_INTEREST
+    assert "installment" in line.lower() or "scheme" in line.lower()
+
+
+def test_installment_accepted_asks_for_payment_contact_then_saves_it():
+    consumer = _consumer(mobile_number="+923001234567")
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True),
+            CallDecision(intent=CustomerIntent.INSTALLMENT_REQUEST, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("I can't pay right now")
+    line = engine.respond("Yes, I'm interested in installments")
+
+    assert engine.stage == ConversationStage.AWAITING_PAYMENT_CONTACT
+    assert "+923001234567" in line
+
+    line2 = engine.respond("Yes, that number is fine")
+    assert engine.stage == ConversationStage.ENDED
+    assert engine.decision.payment_contact_number == "+923001234567"
+    assert "PDF" in line2 or "pdf" in line2.lower()
+
+
+def test_installment_declined_closes_politely():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True),
+            CallDecision(intent=CustomerIntent.REFUSES_TO_PAY, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("I can't pay right now")
+    line = engine.respond("No, not interested in that")
+
+    assert engine.stage == ConversationStage.ENDED
+    assert "thank you" in line.lower() or "goodbye" in line.lower()
 
 
 def test_followup_stage_closes_the_call_on_the_next_response():
@@ -388,6 +554,263 @@ def test_llm_classifier_with_fallback_uses_keyword_classifier_on_api_error(mocke
 
     decision = _llm_classifier_with_fallback(ClassificationStage.MAIN_RESPONSE, _consumer(), "don't call me again", [])
     assert decision.intent == CustomerIntent.DO_NOT_CALL
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider fallback chain (anthropic -> deepseek -> gemini -> keywords)
+# ---------------------------------------------------------------------------
+def test_fallback_chain_skips_unconfigured_providers(mocker):
+    """Only anthropic has a key set -- deepseek/gemini must be skipped
+    without even being called, not attempted and failed."""
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(ai_api_key="fake-anthropic-key", llm_fallback_order="anthropic,deepseek,gemini")
+    expected = CallDecision(intent=CustomerIntent.PROMISE_TO_PAY)
+    mocker.patch("app.conversation_engine.classify_with_llm", return_value=expected)
+    mock_deepseek = mocker.patch("app.conversation_engine._classify_with_deepseek")
+    mock_gemini = mocker.patch("app.conversation_engine._classify_with_gemini")
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I will pay", [], settings=settings
+    )
+    assert decision is expected
+    mock_deepseek.assert_not_called()
+    mock_gemini.assert_not_called()
+
+
+def test_fallback_chain_cascades_anthropic_to_deepseek_to_gemini(mocker):
+    """All three configured; anthropic and deepseek both fail (e.g. the
+    2026-08-08 zero-credit-balance case, plus a DeepSeek outage) -- gemini,
+    last in the order, should still produce the classification."""
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(
+        ai_api_key="fake-anthropic-key",
+        deepseek_api_key="fake-deepseek-key",
+        gemini_api_key="fake-gemini-key",
+        llm_fallback_order="anthropic,deepseek,gemini",
+    )
+    expected = CallDecision(intent=CustomerIntent.ALREADY_PAID)
+    mocker.patch("app.conversation_engine.classify_with_llm", side_effect=RuntimeError("anthropic: zero credit balance"))
+    mocker.patch("app.conversation_engine._classify_with_deepseek", side_effect=RuntimeError("deepseek: rate limited"))
+    mock_gemini = mocker.patch("app.conversation_engine._classify_with_gemini", return_value=expected)
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I already paid this", [], settings=settings
+    )
+    assert decision is expected
+    mock_gemini.assert_called_once()
+
+
+def test_fallback_chain_falls_back_to_keywords_when_every_provider_fails(mocker):
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(
+        ai_api_key="fake-anthropic-key",
+        deepseek_api_key="fake-deepseek-key",
+        gemini_api_key="fake-gemini-key",
+        llm_fallback_order="anthropic,deepseek,gemini",
+    )
+    mocker.patch("app.conversation_engine.classify_with_llm", side_effect=RuntimeError("down"))
+    mocker.patch("app.conversation_engine._classify_with_deepseek", side_effect=RuntimeError("down"))
+    mocker.patch("app.conversation_engine._classify_with_gemini", side_effect=RuntimeError("down"))
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "don't call me again", [], settings=settings
+    )
+    assert decision.intent == CustomerIntent.DO_NOT_CALL  # keyword_fallback_classifier's own match
+
+
+def test_fallback_chain_respects_custom_order(mocker):
+    """LLM_FALLBACK_ORDER=gemini,anthropic should try gemini first even
+    though anthropic is also configured."""
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(
+        ai_api_key="fake-anthropic-key",
+        gemini_api_key="fake-gemini-key",
+        llm_fallback_order="gemini,anthropic",
+    )
+    expected = CallDecision(intent=CustomerIntent.DISPUTE)
+    mock_gemini = mocker.patch("app.conversation_engine._classify_with_gemini", return_value=expected)
+    mock_anthropic = mocker.patch("app.conversation_engine.classify_with_llm")
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "the bill is wrong", [], settings=settings
+    )
+    assert decision is expected
+    mock_gemini.assert_called_once()
+    mock_anthropic.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _classify_with_deepseek / _classify_with_gemini: provider-specific plumbing
+# ---------------------------------------------------------------------------
+def test_classify_with_deepseek_requires_api_key():
+    from app.conversation_engine import _classify_with_deepseek
+
+    settings = Settings(deepseek_api_key=None)
+    with pytest.raises(ConfigurationError):
+        _classify_with_deepseek(ClassificationStage.MAIN_RESPONSE, _consumer(), "hello", [], settings=settings)
+
+
+def test_classify_with_deepseek_parses_tool_call_response(mocker):
+    from app.conversation_engine import _classify_with_deepseek
+
+    settings = Settings(deepseek_api_key="fake-deepseek-key")
+    fake_response = mocker.MagicMock()
+    fake_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "classify_customer_response",
+                                "arguments": '{"intent": "PROMISE_TO_PAY", "human_followup": false}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    mock_post = mocker.patch("httpx.post", return_value=fake_response)
+
+    decision = _classify_with_deepseek(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I will pay", [], settings=settings
+    )
+    assert decision.intent == CustomerIntent.PROMISE_TO_PAY
+    fake_response.raise_for_status.assert_called_once()
+    _, kwargs = mock_post.call_args
+    assert kwargs["json"]["tool_choice"] == {"type": "function", "function": {"name": "classify_customer_response"}}
+
+
+def test_classify_with_openrouter_requires_api_key():
+    from app.conversation_engine import _classify_with_openrouter
+
+    settings = Settings(openrouter_api_key=None)
+    with pytest.raises(ConfigurationError):
+        _classify_with_openrouter(ClassificationStage.MAIN_RESPONSE, _consumer(), "hello", [], settings=settings)
+
+
+def test_classify_with_openrouter_parses_tool_call_response(mocker):
+    from app.conversation_engine import _classify_with_openrouter
+
+    settings = Settings(openrouter_api_key="fake-openrouter-key", openrouter_model="openai/gpt-4o-mini")
+    fake_response = mocker.MagicMock()
+    fake_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {"function": {"name": "classify_customer_response", "arguments": '{"intent": "DISPUTE"}'}}
+                    ]
+                }
+            }
+        ]
+    }
+    mock_post = mocker.patch("httpx.post", return_value=fake_response)
+
+    decision = _classify_with_openrouter(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "this bill is wrong", [], settings=settings
+    )
+    assert decision.intent == CustomerIntent.DISPUTE
+    fake_response.raise_for_status.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://openrouter.ai/api/v1/chat/completions"
+    assert kwargs["json"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_fallback_chain_reaches_openrouter_when_earlier_providers_fail(mocker):
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(
+        ai_api_key="fake-anthropic-key",
+        deepseek_api_key="fake-deepseek-key",
+        gemini_api_key="fake-gemini-key",
+        openrouter_api_key="fake-openrouter-key",
+        llm_fallback_order="anthropic,deepseek,gemini,openrouter",
+    )
+    expected = CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME)
+    mocker.patch("app.conversation_engine.classify_with_llm", side_effect=RuntimeError("down"))
+    mocker.patch("app.conversation_engine._classify_with_deepseek", side_effect=RuntimeError("down"))
+    mocker.patch("app.conversation_engine._classify_with_gemini", side_effect=RuntimeError("down"))
+    mock_openrouter = mocker.patch("app.conversation_engine._classify_with_openrouter", return_value=expected)
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I can't pay right now", [], settings=settings
+    )
+    assert decision is expected
+    mock_openrouter.assert_called_once()
+
+
+def test_classify_with_gemini_requires_api_key():
+    from app.conversation_engine import _classify_with_gemini
+
+    settings = Settings(gemini_api_key=None)
+    with pytest.raises(ConfigurationError):
+        _classify_with_gemini(ClassificationStage.MAIN_RESPONSE, _consumer(), "hello", [], settings=settings)
+
+
+def test_classify_with_gemini_parses_function_call_response(mocker):
+    from app.conversation_engine import _classify_with_gemini
+
+    settings = Settings(gemini_api_key="fake-gemini-key")
+    fake_response = mocker.MagicMock()
+    fake_response.json.return_value = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"functionCall": {"name": "classify_customer_response", "args": {"intent": "ALREADY_PAID"}}}
+                    ]
+                }
+            }
+        ]
+    }
+    mocker.patch("httpx.post", return_value=fake_response)
+
+    decision = _classify_with_gemini(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I already paid", [], settings=settings
+    )
+    assert decision.intent == CustomerIntent.ALREADY_PAID
+    fake_response.raise_for_status.assert_called_once()
+
+
+def test_classify_with_gemini_falls_back_on_missing_function_call(mocker):
+    from app.conversation_engine import _classify_with_gemini
+
+    settings = Settings(gemini_api_key="fake-gemini-key")
+    fake_response = mocker.MagicMock()
+    fake_response.json.return_value = {"candidates": [{"content": {"parts": [{"text": "not a function call"}]}}]}
+    mocker.patch("httpx.post", return_value=fake_response)
+
+    decision = _classify_with_gemini(ClassificationStage.MAIN_RESPONSE, _consumer(), "huh?", [], settings=settings)
+    assert decision.intent == CustomerIntent.OTHER
+    assert decision.human_followup is True
+
+
+# ---------------------------------------------------------------------------
+# _to_gemini_schema: pydantic JSON Schema -> Gemini's OpenAPI-subset schema
+# ---------------------------------------------------------------------------
+def test_to_gemini_schema_inlines_refs_and_uppercases_types():
+    from app.conversation_engine import _to_gemini_schema
+
+    schema = _to_gemini_schema(CallDecision.model_json_schema())
+    assert schema["type"] == "OBJECT"
+    assert "$defs" not in schema
+    assert "$ref" not in str(schema)
+
+    intent_schema = schema["properties"]["intent"]
+    assert intent_schema["type"] == "STRING"
+    assert "PROMISE_TO_PAY" in intent_schema["enum"]
+
+    # secondary_intent is `CustomerIntent | None` in pydantic -- should
+    # collapse to the enum's schema plus nullable, not stay a two-branch union.
+    secondary = schema["properties"]["secondary_intent"]
+    assert secondary["type"] == "STRING"
+    assert secondary["nullable"] is True
 
 
 # ---------------------------------------------------------------------------

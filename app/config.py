@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     ai_api_key: str | None = None
     ai_model: str = "claude-sonnet-5"
 
+    # Fallback LLM providers -- classify_with_llm's Anthropic call is the
+    # primary path, but a live call (2026-08-08) hit an Anthropic account
+    # with zero credit balance mid-conversation. LLM_FALLBACK_ORDER controls
+    # the order conversation_engine tries configured providers in before
+    # giving up and degrading to the offline keyword classifier; a provider
+    # is only tried if its API key below is actually set.
+    llm_fallback_order: str = "anthropic,deepseek,gemini,openrouter"
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-chat"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-flash-latest"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "openai/gpt-4o-mini"
+
     # --- Speech ---
     google_speech_credentials_json: str | None = None
     google_speech_credentials_file: str | None = None
@@ -145,6 +159,27 @@ class Settings(BaseSettings):
         if not self.ai_api_key:
             raise ConfigurationError(
                 "AI conversation engine is not configured. Missing: AI_API_KEY. "
+                "See README 'AI provider setup'."
+            )
+
+    def require_deepseek(self) -> None:
+        if not self.deepseek_api_key:
+            raise ConfigurationError(
+                "DeepSeek fallback is not configured. Missing: DEEPSEEK_API_KEY. "
+                "See README 'AI provider setup'."
+            )
+
+    def require_gemini(self) -> None:
+        if not self.gemini_api_key:
+            raise ConfigurationError(
+                "Gemini fallback is not configured. Missing: GEMINI_API_KEY. "
+                "See README 'AI provider setup'."
+            )
+
+    def require_openrouter(self) -> None:
+        if not self.openrouter_api_key:
+            raise ConfigurationError(
+                "OpenRouter fallback is not configured. Missing: OPENROUTER_API_KEY. "
                 "See README 'AI provider setup'."
             )
 

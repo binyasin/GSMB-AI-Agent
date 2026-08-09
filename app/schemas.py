@@ -349,6 +349,11 @@ class CallDecision(BaseModel):
     verification_passed: bool | None = None
     next_action: str = "CONTINUE"  # "CONTINUE" | "END_CALL" | "TRANSFER_HUMAN"
     notes: str | None = None
+    # Both captured deterministically from the transcript via
+    # conversation_engine._extract_phone_number(), never set by the LLM
+    # directly -- see the Address Rule / Dues & Installment Logic flows.
+    alternate_owner_contact: str | None = None
+    payment_contact_number: str | None = None
 
     @field_validator("promise_to_pay_date")
     @classmethod

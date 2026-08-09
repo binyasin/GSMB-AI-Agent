@@ -98,6 +98,17 @@ class GoogleSpeechClient:
                 sample_rate_hertz=8000,
                 language_code=language_code_for(language),
                 enable_automatic_punctuation=True,
+                # Tried model="phone_call"/use_enhanced=True (2026-08-09) to
+                # fix short-fragment transcripts and the agent seeming to cut
+                # the caller off -- reverted the same day: two consecutive
+                # real calls with it produced ZERO recognized speech despite
+                # a real Twilio recording confirming actual audio was on the
+                # line (no error either -- it just silently heard nothing).
+                # Google's enhanced telephony models have limited language
+                # coverage and most likely don't properly support ur-PK.
+                # Left unset (Google's generic default model), which is what
+                # every working call tonight, including the original
+                # complaint, actually ran on -- imperfect but functional.
             ),
             # Interim (non-final) results let StreamingTurnSession track a
             # "best transcript so far" that a caller can fall back to if the

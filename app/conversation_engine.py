@@ -42,8 +42,16 @@ def _extract_phone_number(text: str) -> str | None:
     return None
 
 
-_AFFIRM_PHRASES = ("yes", "yeah", "yep", "sure", "ji han", "ji haan", "haan", "bilkul", "sahi hai", "theek hai", "correct")
-_DENY_PHRASES = ("no ", "no,", "no.", "nahi", "nahin", "galat hai", "wrong", "not correct", "sahi nahi")
+_AFFIRM_PHRASES = (
+    "yes", "yeah", "yep", "sure", "ji han", "ji haan", "haan", "bilkul", "sahi hai", "theek hai", "correct",
+    # Urdu script -- Google STT for ur-PK transcribes real speech in actual
+    # Urdu script, not Roman Urdu (confirmed live, 2026-08-09).
+    "جی ہاں", "ہاں", "جی جناب", "جی", "بالکل", "ٹھیک ہے", "صحیح ہے",
+)
+_DENY_PHRASES = (
+    "no ", "no,", "no.", "nahi", "nahin", "galat hai", "wrong", "not correct", "sahi nahi",
+    "نہیں", "نہ", "غلط ہے", "صحیح نہیں",
+)
 
 
 def _is_affirmative(text: str) -> bool | None:
@@ -108,8 +116,24 @@ def _date_str(d: dt.date | None) -> str | None:
     return d.strftime("%d-%m-%Y") if d else None
 
 
+def _speakable_name(raw_name: str | None) -> str | None:
+    """Sheet names come through as raw text -- often all-caps with a stray
+    trailing period ("PIR BEPEI MIAN .", "MR UMAR ") -- which a TTS voice
+    reads unnaturally/wrong verbatim (confirmed live, 2026-08-09: "the
+    consumer name isn't being called out correctly"). Title-cases and
+    strips stray punctuation/whitespace so it comes out sounding like a
+    name being spoken, not a report field being read aloud."""
+    if not raw_name:
+        return None
+    cleaned = re.sub(r"[\s.]+$", "", raw_name.strip())  # trailing " ." / "." / whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    return cleaned.title()
+
+
 def greeting_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
-    name = consumer.consumer_name or "sahib/sahiba"
+    name = _speakable_name(consumer.consumer_name) or "sahib/sahiba"
     if language == SupportedLanguage.URDU:
         return (
             "Assalam-o-Alaikum. Main GSM Brothers se call kar rahi hoon, "
@@ -188,6 +212,24 @@ def payment_discussion_intro_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
         return "Main aap se is payment ke silsile mein baat karna chahta hoon."
     return "I wanted to talk to you about this payment."
+
+
+def unclear_response_reask_line(language: SupportedLanguage) -> str:
+    """Regression (2026-08-09): a real call showed the customer saying just
+    "hello" twice -- recognized speech, but not an answer to anything --
+    and the call ended immediately with a goodbye after the second one,
+    while the sheet recorded it as a normal COMPLETED call. A response the
+    classifier can't map to any real intent (CustomerIntent.OTHER) must get
+    one clarifying re-ask before giving up, not an instant close.
+
+    Deliberately different wording from main_question_line/
+    payment_discussion_intro_line, not a repeat of it -- a live call
+    (2026-08-08) already confirmed that repeating the exact same line
+    verbatim reads as a recording, not a live conversation (see git history
+    "Stop re-prompting per unclear turn")."""
+    if language == SupportedLanguage.URDU:
+        return "Maazrat, mujhe thori si samajh nahi aayi. Aap is payment ke bare mein kya sochte hain?"
+    return "Sorry, I didn't quite catch that. What are your thoughts on this payment?"
 
 
 def main_question_line(language: SupportedLanguage) -> str:
@@ -837,6 +879,21 @@ def _classify_with_openrouter(
     )
 
 
+def _classify_with_openai(
+    stage: ClassificationStage,
+    consumer: ConsumerRecord,
+    utterance: str,
+    history: list[TranscriptTurn] | None = None,
+    settings=None,
+) -> CallDecision:
+    settings = settings or get_settings()
+    settings.require_openai()
+    return _classify_with_openai_compatible(
+        "OpenAI", "https://api.openai.com/v1/chat/completions", settings.openai_api_key,
+        settings.openai_model, stage, utterance, history or [],
+    )
+
+
 def _classify_with_gemini(
     stage: ClassificationStage,
     consumer: ConsumerRecord,
@@ -896,6 +953,7 @@ _PROVIDER_KEY_ATTR = {
     "deepseek": "deepseek_api_key",
     "gemini": "gemini_api_key",
     "openrouter": "openrouter_api_key",
+    "openai": "openai_api_key",
 }
 
 
@@ -920,6 +978,8 @@ def _classify_with_provider(
         return _classify_with_gemini(stage, consumer, utterance, history, settings=settings)
     if provider == "openrouter":
         return _classify_with_openrouter(stage, consumer, utterance, history, settings=settings)
+    if provider == "openai":
+        return _classify_with_openai(stage, consumer, utterance, history, settings=settings)
     raise ConfigurationError(f"unknown LLM provider {provider!r} in LLM_FALLBACK_ORDER")
 
 
@@ -997,44 +1057,74 @@ def keyword_fallback_classifier(
 ) -> CallDecision:
     """Deterministic, offline keyword classifier used only when AI_API_KEY is not
     configured (TEST_MODE/DRY_RUN with no LLM credential yet). Not a substitute
-    for classify_with_llm in production — see README "AI provider setup"."""
+    for classify_with_llm in production — see README "AI provider setup".
+
+    Every phrase list here used to be Roman-Urdu/English only -- confirmed
+    live, 2026-08-09 (all three LLM providers down simultaneously, forcing
+    every turn of a real call through this classifier): Google STT for
+    ur-PK transcribes real Urdu speech in actual Urdu script, not Roman
+    Urdu, so a caller answering naturally in Urdu ("جی جناب", "نہیں", "ادا
+    کر دیا") matched nothing at all and fell straight through to the
+    generic OTHER catch-all regardless of what they actually said. Urdu-
+    script variants added alongside the existing Roman-Urdu/English ones
+    for every category below."""
     text = utterance.lower()
 
-    _dnc_phrases = ("don't call", "do not call", "stop calling", "mat karo call", "call mat karo", "call mat karna", "call na karo", "call band karo")
+    _dnc_phrases = (
+        "don't call", "do not call", "stop calling", "mat karo call", "call mat karo", "call mat karna",
+        "call na karo", "call band karo",
+        "کال مت کرو", "کال نہ کریں", "دوبارہ کال نہ کریں", "کال بند کرو", "مجھے کال نہ کریں",
+    )
     if any(p in text for p in _dnc_phrases) or ("call" in text and any(p in text for p in ("mat karna", "mat karo", "na karo", "band karo"))):
         return CallDecision(intent=CustomerIntent.DO_NOT_CALL, do_not_call=True, human_followup=False)
 
     if stage == ClassificationStage.VERIFY_IDENTITY:
-        if any(p in text for p in ("wrong number", "wrong person", "ghalat number", "koi aur")):
+        if any(p in text for p in ("wrong number", "wrong person", "ghalat number", "koi aur", "غلط نمبر", "غلط شخص")):
             return CallDecision(intent=CustomerIntent.WRONG_PERSON, verification_passed=False)
-        if any(p in text for p in ("yes", "ji han", "haan", "speaking", "yeah")):
-            return CallDecision(intent=CustomerIntent.OTHER, verification_passed=True)
         return CallDecision(intent=CustomerIntent.OTHER, verification_passed=True)
 
-    if any(p in text for p in ("already paid", "maine pay kar", "pay kar diya")):
+    if any(p in text for p in ("already paid", "maine pay kar", "pay kar diya", "ادا کر دیا", "پے کر دیا", "میں نے ادا کیا", "پیسے دے دیے", "بل جمع", "جمع کروا دیا")):
         return CallDecision(intent=CustomerIntent.ALREADY_PAID, human_followup=True)
-    _not_my_account_phrases = ("not my account", "not my meter", "someone else's meter", "somebody else's meter", "mera account nahi", "ye mera meter nahi", "mera meter nahi")
+    _not_my_account_phrases = (
+        "not my account", "not my meter", "someone else's meter", "somebody else's meter",
+        "mera account nahi", "ye mera meter nahi", "mera meter nahi",
+        "میرا اکاؤنٹ نہیں", "میرا میٹر نہیں", "یہ میرا میٹر نہیں",
+    )
     if any(p in text for p in _not_my_account_phrases):
         return CallDecision(intent=CustomerIntent.NOT_MY_ACCOUNT, human_followup=True)
-    _not_my_address_phrases = ("not my house", "not my address", "don't live there", "dont live there", "i've moved", "i have moved", "mera ghar nahi", "yahan nahi rehta", "yahan nahi rehti")
+    _not_my_address_phrases = (
+        "not my house", "not my address", "don't live there", "dont live there", "i've moved", "i have moved",
+        "mera ghar nahi", "yahan nahi rehta", "yahan nahi rehti",
+        "میرا گھر نہیں", "یہاں نہیں رہتا", "یہاں نہیں رہتی", "میں یہاں نہیں رہتا",
+    )
     if any(p in text for p in _not_my_address_phrases):
         return CallDecision(intent=CustomerIntent.NOT_MY_ADDRESS, human_followup=True)
-    _complaint_phrases = ("complaint", "not resolved", "not addressed", "shikayat", "meri complaint", "request pending")
+    _complaint_phrases = (
+        "complaint", "not resolved", "not addressed", "shikayat", "meri complaint", "request pending",
+        "شکایت", "حل نہیں ہوئی", "ابھی تک حل نہیں", "درخواست ابھی تک",
+    )
     if any(p in text for p in _complaint_phrases):
         return CallDecision(intent=CustomerIntent.COMPLAINT_NOT_ADDRESSED, human_followup=True)
-    _dispute_phrases = ("dispute", "wrong amount", "not correct", "galat bill", "sahi nahi", "galat hai")
+    _dispute_phrases = (
+        "dispute", "wrong amount", "not correct", "galat bill", "sahi nahi", "galat hai",
+        "غلط بل", "غلط رقم", "صحیح نہیں", "غلط ہے",
+    )
     if any(p in text for p in _dispute_phrases) or ("galat" in text and any(p in text for p in ("bill", "amount", "hisab"))):
         return CallDecision(intent=CustomerIntent.DISPUTE, human_followup=True)
-    _refuses_phrases = ("i don't pay", "i dont pay", "won't pay", "wont pay", "not going to pay", "will not pay", "nahi doon ga", "nahi dena", "nahi de sakta")
+    _refuses_phrases = (
+        "i don't pay", "i dont pay", "won't pay", "wont pay", "not going to pay", "will not pay",
+        "nahi doon ga", "nahi dena", "nahi de sakta",
+        "نہیں دوں گا", "ادا نہیں کروں گا", "پیسے نہیں دوں گا", "نہیں دینا",
+    )
     if any(p in text for p in _refuses_phrases):
         return CallDecision(intent=CustomerIntent.REFUSES_TO_PAY, human_followup=True)
-    if any(p in text for p in ("installment", "qist", "scheme")):
+    if any(p in text for p in ("installment", "qist", "scheme", "قسط", "اقساط", "اسکیم")):
         return CallDecision(intent=CustomerIntent.INSTALLMENT_REQUEST, human_followup=True)
-    if any(p in text for p in ("human", "representative", "agent", "insaan")):
+    if any(p in text for p in ("human", "representative", "agent", "insaan", "انسان", "نمائندہ", "کسی سے بات")):
         return CallDecision(intent=CustomerIntent.HUMAN_ASSISTANCE, human_followup=True)
-    if any(p in text for p in ("not interested", "nahi karna", "dilchaspi nahi", "interest nahi")):
+    if any(p in text for p in ("not interested", "nahi karna", "dilchaspi nahi", "interest nahi", "دلچسپی نہیں", "کوئی دلچسپی نہیں")):
         return CallDecision(intent=CustomerIntent.NOT_INTERESTED)
-    if any(p in text for p in ("call back", "callback", "baad mein call")):
+    if any(p in text for p in ("call back", "callback", "baad mein call", "بعد میں کال", "دوبارہ کال کریں")):
         return CallDecision(intent=CustomerIntent.CALL_BACK, human_followup=True)
 
     # A live scripted-conversation check (2026-08-09) found "mere paas itne
@@ -1048,18 +1138,20 @@ def keyword_fallback_classifier(
         "paisay nahi", "paise nahi", "abhi nahi", "need time", "waqt chahiye",
         "pay nahi", "nahi pay", "ada nahi", "nahi ada", "afford nahi", "nahi afford",
         "nahi kar sakta", "nahi kar sakti", "nahi kar sakte",
+        "پیسے نہیں", "پیسے نہیں ہیں", "ادا نہیں کر سکتا", "ادا نہیں کر سکتی", "ابھی نہیں", "وقت چاہیے",
+        "استطاعت نہیں",
     )
     if any(p in text for p in _cannot_pay_phrases):
         return CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True, notes=utterance)
 
-    if any(p in text for p in ("pay", "adaigi", "ada kar")):
+    if any(p in text for p in ("pay", "adaigi", "ada kar", "ادائیگی", "ادا کروں گا", "پے کر دوں گا", "ادا کر دوں گا")):
         if stage == ClassificationStage.PROMISE_DATE:
             has_hint = any(w in text for w in _DATE_HINT_WORDS) or any(ch.isdigit() for ch in text)
             if not has_hint:
                 return CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, notes=utterance)
-            if "today" in text or "aaj" in text:
+            if "today" in text or "aaj" in text or "آج" in text:
                 return CallDecision(intent=CustomerIntent.WILL_PAY_TODAY, promise_to_pay_date=dt.date.today())
-            if "tomorrow" in text or "kal" in text:
+            if "tomorrow" in text or "kal" in text or "کل" in text:
                 return CallDecision(
                     intent=CustomerIntent.WILL_PAY_TOMORROW,
                     promise_to_pay_date=dt.date.today() + dt.timedelta(days=1),
@@ -1068,8 +1160,20 @@ def keyword_fallback_classifier(
         return CallDecision(intent=CustomerIntent.PROMISE_TO_PAY, promise_to_pay_date=None)
 
     _question_starters = ("why ", "what ", "how ", "kyun ", "kya ", "kaise ")
-    if "?" in utterance or any(text.startswith(p) for p in _question_starters):
+    _question_starters_ur = ("کیوں", "کیا", "کیسے")
+    if "?" in utterance or any(text.startswith(p) for p in _question_starters) or any(w in utterance for w in _question_starters_ur):
         return CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True, notes=utterance)
+
+    # A bare acknowledgment ("جی جناب", "ji han", "theek hai") isn't gibberish
+    # -- the caller understood and is engaged, they just haven't answered the
+    # actual question yet (more likely now that the payment intro is a
+    # statement, not a direct question -- see payment_discussion_intro_line).
+    # Treated as "still listening, ask the direct question", not "unclear,
+    # re-ask or give up" -- confirmed live, 2026-08-09: "جی جناب" after the
+    # payment intro was previously misread as a second unclear turn and
+    # ended the call.
+    if stage == ClassificationStage.MAIN_RESPONSE and _is_affirmative(text) is True:
+        return CallDecision(intent=CustomerIntent.OTHER, notes="acknowledgment_only")
 
     return CallDecision(intent=CustomerIntent.OTHER, human_followup=True, notes=utterance)
 
@@ -1110,6 +1214,7 @@ class ConversationEngine:
         self.decision = CallDecision(intent=CustomerIntent.OTHER)
         self._classifier = classifier or self._default_classifier()
         self._pending_followup_intent: CustomerIntent | None = None
+        self._consecutive_unclear_main_response = 0
 
     @staticmethod
     def _default_classifier():
@@ -1207,6 +1312,13 @@ class ConversationEngine:
         decision = decision.model_copy(update={"verification_passed": self.decision.verification_passed})
         self.decision = decision
 
+        # Reset here (not only in the OTHER-intent branch below) so any
+        # recognized intent -- even ones handled earlier in this method and
+        # returning before reaching that branch -- clears a prior unclear
+        # count, keeping it a true "consecutive" counter.
+        if decision.intent != CustomerIntent.OTHER:
+            self._consecutive_unclear_main_response = 0
+
         if decision.do_not_call:
             self.stage = ConversationStage.ENDED
             return dnc_ack_line(self.language)
@@ -1265,6 +1377,28 @@ class ConversationEngine:
                 parts.append(secondary)
             parts.append(followup_question(self.language))
             return self._apply_tone(" ".join(parts), decision)
+
+        # A bare acknowledgment ("جی جناب", "ji han", "theek hai") right
+        # after the payment-intro *statement* (not a direct question --
+        # see payment_discussion_intro_line) means the caller is listening,
+        # not that we failed to understand them. Ask the actual direct
+        # question instead of treating it as unclear -- confirmed live,
+        # 2026-08-09: this was previously misread as a second unclear turn
+        # in a row and ended the call right after "جی جناب".
+        if decision.intent == CustomerIntent.OTHER and decision.notes == "acknowledgment_only":
+            return self._apply_tone(main_question_line(self.language), decision)
+
+        # A response the classifier couldn't map to any real intent (plain
+        # "hello", background noise transcribed as a word, etc.) must get
+        # one clarifying re-ask before giving up -- not an instant goodbye.
+        # Every other intent that reaches this point (WILL_PAY_*/CALL_BACK/
+        # WRONG_NUMBER/NOT_INTERESTED) closes correctly here since those ARE
+        # clear signals; CustomerIntent.OTHER specifically means "we don't
+        # know what they meant".
+        if decision.intent == CustomerIntent.OTHER:
+            self._consecutive_unclear_main_response += 1
+            if self._consecutive_unclear_main_response == 1:
+                return self._apply_tone(unclear_response_reask_line(self.language), decision)
 
         self.stage = ConversationStage.ENDED
         parts = []

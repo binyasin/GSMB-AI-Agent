@@ -5,6 +5,7 @@ import datetime as dt
 import pytest
 
 from app.calling_agent import (
+    ConcurrencyLimitReached,
     _readable_transcript,
     acquire_job_lock,
     finalize_call_attempt,
@@ -13,8 +14,8 @@ from app.calling_agent import (
 )
 from app.google_sheets import GoogleSheetRepository
 from app.models import CallAttempt, CallJob, Consumer, DoNotCall
-from app.queue_manager import build_daily_queue
-from app.schemas import CallDecision, CallState, CustomerIntent
+from app.queue_manager import build_daily_queue, get_or_create_job, sync_consumers_to_db
+from app.schemas import CallDecision, CallState, ConsumerRecord, CustomerIntent
 from tests.conftest import FakeWorksheet, make_sample_worksheet
 
 JOB_DATE = dt.date(2026, 8, 10)
@@ -56,6 +57,42 @@ def test_process_next_consumer_dry_run_completes_full_pipeline(db_session, monke
     assert consumer.call_status == CallState.COMPLETED.value
     assert consumer.call_attempt == 1
     assert consumer.transcript is not None
+
+
+def test_process_next_consumer_respects_max_concurrent_calls(db_session, monkeypatch):
+    """Regression (2026-08-09): MAX_CONCURRENT_CALLS was defined in config
+    but never actually enforced anywhere -- confirmed live, on the very
+    first real multi-consumer campaign run, where a second real consumer
+    got dialed while a first call to a different real consumer was still
+    ringing. process_next_consumer must refuse to place a new call while
+    settings.max_concurrent_calls calls are already in flight for the day."""
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("MAX_CONCURRENT_CALLS", "1")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    sync_consumers_to_db(
+        db_session,
+        [
+            ConsumerRecord(consumer_no="CN-A", consumer_name="A", mobile_number="+923001111111"),
+            ConsumerRecord(consumer_no="CN-B", consumer_name="B", mobile_number="+923002222222"),
+        ],
+    )
+    db_session.commit()
+    consumer_a = db_session.query(Consumer).filter_by(consumer_no="CN-A").one()
+    consumer_b = db_session.query(Consumer).filter_by(consumer_no="CN-B").one()
+    job_a = get_or_create_job(db_session, consumer_a, JOB_DATE)
+    get_or_create_job(db_session, consumer_b, JOB_DATE)
+    db_session.commit()
+
+    # Simulate consumer A's call already ringing (as it would be mid-call,
+    # between make_call() and the status webhook reporting completion).
+    job_a.state = CallState.RINGING.value
+    db_session.commit()
+
+    with pytest.raises(ConcurrencyLimitReached):
+        process_next_consumer(db_session, job_date=JOB_DATE)
 
 
 def test_process_next_consumer_returns_none_when_queue_empty(db_session, monkeypatch):

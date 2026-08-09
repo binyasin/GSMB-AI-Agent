@@ -61,15 +61,22 @@ def sync_consumers_to_db(session: Session, records: list[ConsumerRecord]) -> Non
         consumer.promise_to_pay_flag = record.promise_to_pay_flag
         consumer.promise_to_pay_date = record.promise_to_pay_date
         consumer.remarks = record.remarks
-        consumer.call_attempt = record.call_attempt
         consumer.call_status = record.call_status or consumer.call_status or "PENDING"
         consumer.call_outcome = record.call_outcome
-        consumer.transcript = record.transcript
-        consumer.recording_url = record.recording_url
-        consumer.last_call_date = record.last_call_date
-        consumer.agent_notes = record.agent_notes
         consumer.human_followup = record.human_followup
         consumer.do_not_call = record.do_not_call
+        # call_attempt/transcript/recording_url/last_call_date/agent_notes
+        # deliberately NOT synced from the sheet here -- confirmed live,
+        # 2026-08-09: this function runs on every ~20s scheduler tick,
+        # re-reading the whole sheet. finalize_call_attempt is the only
+        # legitimate writer of these fields (DB -> sheet, one-way); an
+        # operator has no reason to hand-edit a transcript or call-attempt
+        # count in the sheet. But this tick's sheet read can race a call's
+        # own DB-write-then-sheet-write (only 20s apart), and blindly
+        # overwriting these from a stale sheet read silently clobbered a
+        # completed call's real transcript/notes/date with an earlier
+        # attempt's -- or blank -- values on two different real consumers
+        # during tonight's first live campaign run.
 
     session.flush()
 

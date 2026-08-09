@@ -13,7 +13,13 @@ import datetime as dt
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
-from app.calling_agent import DuplicateCallError, place_call_for_consumer, retry_pending_sheet_syncs, run_test_call
+from app.calling_agent import (
+    ConcurrencyLimitReached,
+    DuplicateCallError,
+    place_call_for_consumer,
+    retry_pending_sheet_syncs,
+    run_test_call,
+)
 from app.config import ConfigurationError, get_settings
 from app.database import get_db
 from app.models import CallJob
@@ -173,6 +179,8 @@ def call_consumer(consumer_no: str, session: Session = Depends(get_db)):
         attempt = place_call_for_consumer(session, consumer_no, telephony_provider=telephony_provider)
     except DuplicateCallError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrencyLimitReached as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     if attempt is None:
         raise HTTPException(

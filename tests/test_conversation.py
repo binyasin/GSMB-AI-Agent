@@ -14,6 +14,7 @@ from app.conversation_engine import (
     _sanitize_decision,
     classify_with_llm,
     dues_line,
+    greeting_line,
     keyword_fallback_classifier,
     scheme_line,
 )
@@ -32,6 +33,29 @@ def _consumer(**overrides) -> ConsumerRecord:
     )
     base.update(overrides)
     return ConsumerRecord(**base)
+
+
+# ---------------------------------------------------------------------------
+# _speakable_name / greeting_line: sheet names come through all-caps with a
+# stray trailing period ("PIR BEPEI MIAN ."), which a TTS voice reads
+# unnaturally verbatim (reported live, 2026-08-09)
+# ---------------------------------------------------------------------------
+def test_speakable_name_strips_trailing_period_and_title_cases():
+    from app.conversation_engine import _speakable_name
+
+    assert _speakable_name("PIR BEPEI MIAN .") == "Pir Bepei Mian"
+    assert _speakable_name("MR UMAR") == "Mr Umar"
+    assert _speakable_name("NASEEM USMAN") == "Naseem Usman"
+    assert _speakable_name(None) is None
+    assert _speakable_name("") is None
+
+
+def test_greeting_line_speaks_the_cleaned_up_name():
+    consumer = _consumer(consumer_name="PIR BEPEI MIAN .")
+    line = greeting_line(consumer, SupportedLanguage.ENGLISH)
+    assert "Pir Bepei Mian" in line
+    assert "PIR BEPEI MIAN" not in line
+    assert " ." not in line
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +465,64 @@ def test_unrelated_customer_question_still_gets_generic_deflection():
     assert "ai assistant" not in line.lower()
 
 
+# ---------------------------------------------------------------------------
+# Unclear-but-recognized main response (spec 2026-08-09): a plain "hello"
+# that isn't an answer to anything must get one re-ask before giving up
+# ---------------------------------------------------------------------------
+def test_unclear_main_response_gets_one_reask_before_closing():
+    """Regression (2026-08-09): a real call showed the customer saying just
+    "hello" (recognized speech, unclassifiable intent) twice in a row, and
+    the call ended immediately with a goodbye after the second one -- while
+    the sheet recorded it as a normal COMPLETED call, with no real
+    conversation ever having happened."""
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.OTHER, human_followup=True, notes="hello"),
+            CallDecision(intent=CustomerIntent.OTHER, human_followup=True, notes="hello"),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line1 = engine.respond("hello")
+
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE  # still listening, not ended
+    assert "didn't quite catch" in line1.lower()
+
+    line2 = engine.respond("hello")
+    assert engine.stage == ConversationStage.ENDED
+    assert "thank you" in line2.lower() or "goodbye" in line2.lower()
+
+
+def test_recognized_intent_between_two_unclear_responses_resets_the_counter():
+    """A clear answer sandwiched between two unclear ones must reset the
+    counter -- two *non-consecutive* unclear turns shouldn't burn through
+    the one-re-ask allowance and end the call early."""
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.OTHER, human_followup=True),  # unclear #1 -> re-ask
+            CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True),  # clear -> resets counter
+            CallDecision(intent=CustomerIntent.OTHER, human_followup=True),  # unclear again
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    engine.respond("hello")
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE
+
+    engine.respond("why are you calling me")
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE
+
+    line = engine.respond("hello again")
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE  # re-asked again, not closed
+    assert "didn't quite catch" in line.lower()
+
+
 def test_followup_stage_closes_the_call_on_the_next_response():
     consumer = _consumer()
     engine = ConversationEngine(
@@ -830,6 +912,42 @@ def test_classify_with_openrouter_parses_tool_call_response(mocker):
     assert kwargs["json"]["model"] == "openai/gpt-4o-mini"
 
 
+def test_classify_with_openai_requires_api_key():
+    from app.conversation_engine import _classify_with_openai
+
+    settings = Settings(openai_api_key=None)
+    with pytest.raises(ConfigurationError):
+        _classify_with_openai(ClassificationStage.MAIN_RESPONSE, _consumer(), "hello", [], settings=settings)
+
+
+def test_classify_with_openai_parses_tool_call_response(mocker):
+    from app.conversation_engine import _classify_with_openai
+
+    settings = Settings(openai_api_key="fake-openai-key", openai_model="gpt-4o-mini")
+    fake_response = mocker.MagicMock()
+    fake_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {"function": {"name": "classify_customer_response", "arguments": '{"intent": "ALREADY_PAID"}'}}
+                    ]
+                }
+            }
+        ]
+    }
+    mock_post = mocker.patch("httpx.post", return_value=fake_response)
+
+    decision = _classify_with_openai(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "I already paid", [], settings=settings
+    )
+    assert decision.intent == CustomerIntent.ALREADY_PAID
+    fake_response.raise_for_status.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://api.openai.com/v1/chat/completions"
+    assert kwargs["json"]["model"] == "gpt-4o-mini"
+
+
 def test_fallback_chain_reaches_openrouter_when_earlier_providers_fail(mocker):
     from app.conversation_engine import _llm_classifier_with_fallback
 
@@ -989,3 +1107,44 @@ def test_keyword_fallback_detects_not_interested_variants(utterance):
 def test_keyword_fallback_detects_new_category_variants(utterance, expected_intent):
     decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
     assert decision.intent == expected_intent
+
+
+@pytest.mark.parametrize(
+    "utterance,expected_intent",
+    [
+        # Regression (2026-08-09): every phrase list here was Roman-Urdu/
+        # English only -- real Urdu-script speech (what Google STT for
+        # ur-PK actually transcribes) matched nothing at all and fell
+        # through to the generic OTHER catch-all regardless of what the
+        # customer said. These are real transcripts from live calls tonight.
+        ("ادا کر دیا", CustomerIntent.ALREADY_PAID),
+        ("میرا میٹر نہیں ہے", CustomerIntent.NOT_MY_ACCOUNT),
+        ("یہاں نہیں رہتا", CustomerIntent.NOT_MY_ADDRESS),
+        ("شکایت ابھی تک حل نہیں ہوئی", CustomerIntent.COMPLAINT_NOT_ADDRESSED),
+        ("غلط بل ہے", CustomerIntent.DISPUTE),
+        ("نہیں دوں گا", CustomerIntent.REFUSES_TO_PAY),
+        ("قسط چاہیے", CustomerIntent.INSTALLMENT_REQUEST),
+        ("کسی نمائندہ سے بات کروں", CustomerIntent.HUMAN_ASSISTANCE),
+        ("کوئی دلچسپی نہیں", CustomerIntent.NOT_INTERESTED),
+        ("پیسے نہیں ہیں میرے پاس", CustomerIntent.NEEDS_MORE_TIME),
+        ("کیا مسئلہ ہے", CustomerIntent.CUSTOMER_QUESTION),
+    ],
+)
+def test_keyword_fallback_detects_urdu_script_variants(utterance, expected_intent):
+    decision = keyword_fallback_classifier(ClassificationStage.MAIN_RESPONSE, _consumer(), utterance, [])
+    assert decision.intent == expected_intent
+
+
+def test_keyword_fallback_treats_bare_urdu_acknowledgment_as_still_listening():
+    """Regression (2026-08-09): a real call had the customer say "جی جناب"
+    (a polite "yes sir", not gibberish) right after the payment-intro
+    *statement* -- previously misread as a second unclear turn in a row and
+    ended the call. Must ask the direct question instead."""
+    consumer = _consumer()
+    engine = ConversationEngine(consumer, language=SupportedLanguage.URDU, classifier=keyword_fallback_classifier)
+    engine.start()
+    engine.respond("جی ہاں")  # identity confirmed
+    line = engine.respond("جی جناب")
+
+    assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE  # still going, not ended
+    assert "adaigi" in line.lower() or "soch rahe" in line.lower()

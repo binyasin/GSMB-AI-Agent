@@ -39,6 +39,19 @@ class DuplicateCallError(RuntimeError):
     pass
 
 
+class ConcurrencyLimitReached(RuntimeError):
+    """Raised instead of placing a call when settings.max_concurrent_calls
+    calls are already in flight for the day -- see _count_in_flight_calls.
+
+    Found live, 2026-08-09: MAX_CONCURRENT_CALLS was defined in config but
+    never actually read/enforced anywhere. The scheduler_tick's 20s cadence
+    just kept picking whatever job was next-in-queue-and-unlocked on every
+    tick regardless of whether a previous call was still ringing/connected,
+    so real calls to different real consumers ended up overlapping in
+    flight during the very first live campaign run -- confirmed via Twilio
+    call logs, not a theoretical risk."""
+
+
 def _consumer_to_record(consumer: Consumer) -> ConsumerRecord:
     return ConsumerRecord(
         consumer_no=consumer.consumer_no,
@@ -316,6 +329,27 @@ def simulate_conversation(
     return engine.decision, transcript_json
 
 
+_IN_FLIGHT_STATES = {
+    CallState.DIALING.value,
+    CallState.RINGING.value,
+    CallState.CONNECTED.value,
+    CallState.IN_PROGRESS.value,
+}
+
+
+def _count_in_flight_calls(session: Session, job_date: dt.date) -> int:
+    from sqlalchemy import func, select
+
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(CallJob)
+            .where(CallJob.job_date == job_date, CallJob.state.in_(_IN_FLIGHT_STATES))
+        )
+        or 0
+    )
+
+
 def _dial_or_simulate(
     session: Session,
     consumer: Consumer,
@@ -327,6 +361,12 @@ def _dial_or_simulate(
     process_next_consumer (queue-order selection) and place_call_for_consumer
     (a specific consumer_no, bypassing queue order; see its docstring)."""
     settings = get_settings()
+
+    in_flight = _count_in_flight_calls(session, job.job_date)
+    if in_flight >= settings.max_concurrent_calls:
+        raise ConcurrencyLimitReached(
+            f"{in_flight} call(s) already in flight for {job.job_date} (MAX_CONCURRENT_CALLS={settings.max_concurrent_calls})"
+        )
 
     if not acquire_job_lock(session, job):
         logger.info("job for consumer_no=%s already locked by another worker; skipping", consumer.consumer_no)

@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 
-from app.calling_agent import DuplicateCallError, process_next_consumer
+from app.calling_agent import ConcurrencyLimitReached, DuplicateCallError, process_next_consumer
 from app.campaign_control import router as campaign_router
 from app.config import get_settings
 from app.database import SessionLocal, init_db
@@ -97,6 +97,8 @@ def scheduler_tick() -> None:
                 process_next_consumer(session, telephony_provider=provider, sheet_repo=sheet_repo, job_date=now.date())
             except DuplicateCallError:
                 logger.info("job already locked by another worker this tick; skipping")
+            except ConcurrencyLimitReached as exc:
+                logger.info("skipping this tick: %s", exc)
             except Exception:
                 logger.exception("error while processing next consumer")
 
@@ -159,6 +161,7 @@ def health():
             "deepseek": bool(settings.deepseek_api_key),
             "gemini": bool(settings.gemini_api_key),
             "openrouter": bool(settings.openrouter_api_key),
+            "openai": bool(settings.openai_api_key),
         },
     }
 

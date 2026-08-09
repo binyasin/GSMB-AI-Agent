@@ -61,13 +61,15 @@ class Settings(BaseSettings):
     # the order conversation_engine tries configured providers in before
     # giving up and degrading to the offline keyword classifier; a provider
     # is only tried if its API key below is actually set.
-    llm_fallback_order: str = "anthropic,deepseek,gemini,openrouter"
+    llm_fallback_order: str = "anthropic,deepseek,gemini,openrouter,openai"
     deepseek_api_key: str | None = None
     deepseek_model: str = "deepseek-chat"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-flash-latest"
     openrouter_api_key: str | None = None
     openrouter_model: str = "openai/gpt-4o-mini"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
 
     # --- Speech ---
     google_speech_credentials_json: str | None = None
@@ -180,6 +182,13 @@ class Settings(BaseSettings):
         if not self.openrouter_api_key:
             raise ConfigurationError(
                 "OpenRouter fallback is not configured. Missing: OPENROUTER_API_KEY. "
+                "See README 'AI provider setup'."
+            )
+
+    def require_openai(self) -> None:
+        if not self.openai_api_key:
+            raise ConfigurationError(
+                "OpenAI fallback is not configured. Missing: OPENAI_API_KEY. "
                 "See README 'AI provider setup'."
             )
 

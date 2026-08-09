@@ -4,8 +4,8 @@ import datetime as dt
 
 from app.google_sheets import GoogleSheetRepository
 from app.models import CallJob, Consumer, DoNotCall
-from app.queue_manager import build_daily_queue, next_eligible_consumer
-from app.schemas import CallState
+from app.queue_manager import build_daily_queue, next_eligible_consumer, sync_consumers_to_db
+from app.schemas import CallState, ConsumerRecord
 from tests.conftest import make_sample_worksheet
 
 
@@ -101,3 +101,48 @@ def test_sheet_re_sync_does_not_duplicate_consumers(db_session):
     build_daily_queue(db_session, _records(), job_date=dt.date(2026, 8, 10))
     count = db_session.query(Consumer).filter_by(consumer_no="CN-001").count()
     assert count == 1
+
+
+def test_sync_consumers_to_db_never_overwrites_call_outcome_fields(db_session):
+    """Regression (2026-08-09): sync_consumers_to_db runs on every ~20s
+    scheduler tick, re-reading the whole sheet. Confirmed live on two real
+    consumers during the first live campaign run: a call's own DB-write
+    (agent_notes, last_call_date, transcript, recording_url, call_attempt)
+    then sheet-write race against the *next* tick's stale sheet read --
+    which was blindly overwriting those DB-authoritative fields back to an
+    earlier attempt's (or blank) values. finalize_call_attempt is the only
+    legitimate writer of these fields; sync_consumers_to_db must leave them
+    alone entirely, no matter what the sheet currently shows."""
+    consumer = Consumer(consumer_no="CN-100")
+    db_session.add(consumer)
+    db_session.flush()
+
+    # Simulate finalize_call_attempt having just written a completed call's
+    # real outcome to the DB.
+    consumer.call_attempt = 2
+    consumer.agent_notes = "real transcript notes from the successful call"
+    consumer.transcript = '[{"speaker": "Agent", "message": "hello"}]'
+    consumer.recording_url = "https://api.twilio.com/recording/RE123"
+    consumer.last_call_date = dt.date(2026, 8, 9)
+    db_session.commit()
+
+    # A scheduler tick's sheet read, racing that write, still shows the
+    # sheet's stale/blank values for this consumer.
+    stale_record = ConsumerRecord(
+        consumer_no="CN-100",
+        consumer_name="Test Consumer",
+        mobile_number="+923001234567",
+        call_attempt=1,
+        agent_notes="Call ended with Twilio status=no-answer before a full conversation was captured.",
+        transcript=None,
+        recording_url=None,
+        last_call_date=None,
+    )
+    sync_consumers_to_db(db_session, [stale_record])
+    db_session.refresh(consumer)
+
+    assert consumer.call_attempt == 2
+    assert consumer.agent_notes == "real transcript notes from the successful call"
+    assert consumer.transcript == '[{"speaker": "Agent", "message": "hello"}]'
+    assert consumer.recording_url == "https://api.twilio.com/recording/RE123"
+    assert consumer.last_call_date == dt.date(2026, 8, 9)

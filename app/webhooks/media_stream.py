@@ -104,9 +104,22 @@ def pop_conversation(attempt_uid: str) -> ConversationEngine | None:
     return ACTIVE_CONVERSATIONS.pop(attempt_uid, None)
 
 
+# ~40ms of 8kHz 8-bit mu-law audio per outbound Twilio 'media' frame.
+# Sending the whole utterance as one giant WebSocket message (the previous
+# behavior) is exactly what Twilio's Media Streams docs warn against --
+# Twilio can't start playback until that one huge frame is fully received
+# and decoded, which is what made the AI's speech sound like it played in
+# broken chunks instead of one smooth continuous voice (reported live,
+# 2026-08-09). Small sequential frames let Twilio's own jitter buffer
+# smooth playback the way it's designed to.
+_MEDIA_CHUNK_BYTES = 320
+
+
 async def _synthesize_and_send(websocket: WebSocket, speech_client, text: str, language: SupportedLanguage, stream_sid: str) -> None:
     audio = await asyncio.to_thread(speech_client.synthesize, text, language)
-    await websocket.send_text(encode_media_payload(audio, stream_sid))
+    for offset in range(0, len(audio), _MEDIA_CHUNK_BYTES):
+        chunk = audio[offset : offset + _MEDIA_CHUNK_BYTES]
+        await websocket.send_text(encode_media_payload(chunk, stream_sid))
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +226,23 @@ async def _process_turn(
         session.close()
         logger.info("turn fed %d inbound audio chunk(s) to Google STT", chunks_fed)
 
-    return await transcript_task
+    try:
+        return await transcript_task
+    except Exception as exc:
+        # Live call (2026-08-09): Google's streaming session itself can raise
+        # mid-turn -- confirmed with grpc OUT_OF_RANGE "Audio Timeout Error:
+        # Long duration elapsed without audio" when the caller took a while
+        # to start speaking. Previously this propagated all the way out of
+        # media_stream()'s turn loop and was caught by its top-level
+        # `except Exception`, which ended the *entire call* over what should
+        # have just been one quiet/failed turn. Same fallback as the
+        # soft-timeout path above: treat it as an empty/interim turn and let
+        # the caller's normal re-prompt / MAX_CONSECUTIVE_EMPTY_TURNS
+        # handling in handle_turn_result decide whether to continue.
+        logger.warning(
+            "STT session errored mid-turn (%s); falling back to interim transcript %r", exc, session.latest_transcript
+        )
+        return session.latest_transcript
 
 
 @router.websocket("/media-stream")

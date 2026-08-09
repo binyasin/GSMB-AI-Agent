@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+import time
 from enum import StrEnum
 
 from app.config import ConfigurationError, get_settings
@@ -179,6 +180,16 @@ def scheme_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str | 
     return "If you're unable to pay the full amount at once, an installment/payment facility is available for your account."
 
 
+def payment_discussion_intro_line(language: SupportedLanguage) -> str:
+    """Spec 2026-08-09 (human-like calling agent): state the dues, then
+    invite the customer to respond -- "state -> stop -> listen" rather than
+    an immediate closed yes/no question tacked straight onto the dues
+    figure ("read data -> fixed question")."""
+    if language == SupportedLanguage.URDU:
+        return "Main aap se is payment ke silsile mein baat karna chahta hoon."
+    return "I wanted to talk to you about this payment."
+
+
 def main_question_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
         return "Aap is bare mein kya soch rahe hain? Kya aap adaigi kar sakte hain?"
@@ -193,14 +204,14 @@ def promise_date_question_line(language: SupportedLanguage) -> str:
 
 def already_paid_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
-        return "Shukriya. Hamara numainda aap ki payment record verify kar lega."
-    return "Thank you. Our representative can verify the payment record."
+        return "Achha ji, theek hai."
+    return "Alright, understood."
 
 
 def already_paid_receipt_question_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
-        return "Kya aap ke paas payment receipt ya transaction reference maujood hai?"
-    return "Do you have the payment receipt or transaction reference available?"
+        return "Payment kab ki thi, aur kya aap ke paas receipt ya transaction reference maujood hai?"
+    return "When was the payment made, and do you have the receipt or transaction reference available?"
 
 
 def dispute_line(language: SupportedLanguage) -> str:
@@ -264,36 +275,40 @@ def not_my_account_followup_question_line(language: SupportedLanguage) -> str:
 
 
 def address_confirmation_question_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
-    """Spec 2026-08-09 Address Rule: on a wrong-address claim, never
-    disconnect -- first read back the plot/house/address on record and ask
+    """Spec 2026-08-09 (human-like calling agent, superseding the earlier
+    same-day wording): on a wrong-address claim, never disconnect -- briefly
+    acknowledge, then read back the plot/house/address on record and ask
     the customer to confirm it, since a hasty or mis-transcribed "not my
     address" shouldn't immediately escalate to asking for someone else's
     contact details."""
     address = consumer.address
     if language == SupportedLanguage.URDU:
         if address:
-            return f"Hamare record ke mutabiq is account ka pata/plot ye hai: {address}. Kya ye aap ka mojooda ghar ya plot hai?"
-        return "Kya aap barah-e-karam is account ka registered plot ya ghar number confirm kar sakte hain?"
+            return f"Ji, koi masla nahi. Main pehle address confirm kar leta hoon. Hamare record mein address {address} hai. Kya aap isi property ke bare mein baat kar rahe hain?"
+        return "Ji, koi masla nahi. Kya aap barah-e-karam is account ka registered plot ya ghar number confirm kar sakte hain?"
     if address:
-        return f"According to our record, this account's registered address/plot is: {address}. Is this your current house or plot?"
-    return "Could you please confirm the plot or house number registered against this account?"
+        return f"No problem, let me confirm the address first. Our record shows: {address}. Are you referring to this same property?"
+    return "No problem. Could you please confirm the plot or house number registered against this account?"
 
 
-def alternate_contact_request_line(language: SupportedLanguage) -> str:
-    """Exact wording specified by the user (2026-08-09) for when the customer
-    still denies the address after confirmation -- asks for the actual
-    owner/current occupant's contact instead of disconnecting or making any
-    threat/legal claim."""
+def alternate_contact_request_line(consumer: ConsumerRecord, language: SupportedLanguage) -> str:
+    """Spec 2026-08-09 (human-like calling agent, superseding the earlier
+    same-day wording) for when the customer still denies the address after
+    confirmation -- asks for the actual owner/current occupant's contact
+    instead of disconnecting or making any threat/legal claim."""
+    dues_ur = _money_urdu(consumer.outstanding_amount)
+    dues_en = _money(consumer.outstanding_amount)
     if language == SupportedLanguage.URDU:
+        dues_phrase = f"{dues_ur} ke" if dues_ur else ""
         return (
-            "جی، ہمارے ریکارڈ کے مطابق اس موجودہ پلاٹ/گھر نمبر پر KE کے واجبات موجود ہیں۔ ہم ان واجبات کی ادائیگی کے "
-            "لیے متعلقہ مالک یا موجودہ صارف سے رابطہ کرنا چاہتے ہیں۔ اگر آپ کے پاس اصل مالک یا موجودہ صارف کا رابطہ "
-            "نمبر ہے تو براہِ کرم فراہم کر دیں۔"
+            f"Ji, samajh gaya. Hamare record mein is property par {dues_phrase} dues show ho rahe hain. Hum "
+            "payment ke hawale se asal owner ya current consumer se rabta karna chahte hain. Agar aap ke paas "
+            "un ka contact number hai to aap provide kar sakte hain."
         )
+    dues_phrase = dues_en or "outstanding"
     return (
-        "I understand. According to our record, K-Electric dues exist against this current plot/house number. "
-        "We would like to contact the relevant owner or current occupant to settle these dues. If you have a "
-        "contact number for the actual owner or current occupant, please share it with us."
+        f"I understand. Our record shows {dues_phrase} dues against this property. We'd like to contact the "
+        "actual owner or current consumer regarding payment. If you have their contact number, you can provide it."
     )
 
 
@@ -310,17 +325,36 @@ def alternate_contact_not_provided_line(language: SupportedLanguage) -> str:
 
 
 def installment_offer_question_line(language: SupportedLanguage) -> str:
-    """Exact wording specified by the user (2026-08-09) -- spoken ONLY after
-    the customer says they cannot pay the full amount; never mentioned
-    proactively (spec 2026-08-09 Dues & Installment Logic)."""
+    """Spec 2026-08-09 (human-like calling agent): acknowledge the
+    difficulty naturally first, then mention the installment/scheme option
+    -- spoken ONLY after the customer says they can't pay the full amount,
+    never proactively, and only when consumer.installment_eligible is true
+    (see no_scheme_available_line for the alternative)."""
     if language == SupportedLanguage.URDU:
         return (
-            "جی، میں آپ کی بات سمجھ رہا ہوں۔ ہمارے پاس scheme/installment کا option بھی موجود ہے۔ آپ اس کے بارے میں "
-            "کیا خیال رکھتے ہیں؟"
+            "Ji, main samajh sakta hoon. Ek saath itni amount arrange karna mushkil ho sakta hai. Waise aap ke "
+            "account ke liye installment/scheme ka option available hai. Agar aap chahein to main aap ko us ke "
+            "bare mein bata sakta hoon."
         )
     return (
-        "I understand your situation. We also have a scheme/installment option available. What are your thoughts "
-        "on that?"
+        "I understand. Arranging the full amount at once can be difficult. We do have an installment/scheme "
+        "option available for your account, if you'd like me to tell you about it."
+    )
+
+
+def no_scheme_available_line(language: SupportedLanguage) -> str:
+    """Spec 2026-08-09: spoken when the customer can't pay but
+    consumer.installment_eligible is false -- never invents a scheme that
+    doesn't exist in the record."""
+    if language == SupportedLanguage.URDU:
+        return (
+            "Ji, main samajh sakta hoon. Is waqt mere paas aap ke account ke liye installment ki confirmed "
+            "information available nahi hai. Aap apne qareebi KE Customer Service Centre se payment options ke "
+            "bare mein confirm kar sakte hain."
+        )
+    return (
+        "I understand. I don't currently have confirmed installment information for your account. You can "
+        "confirm payment options with your nearest KE Customer Service Centre."
     )
 
 
@@ -375,24 +409,17 @@ def anything_else_question_line(language: SupportedLanguage) -> str:
 
 
 def complaint_not_addressed_line(language: SupportedLanguage) -> str:
+    """Spec 2026-08-09: short, natural acknowledgment -- not a formal
+    paragraph -- and handle the complaint before returning to payment."""
     if language == SupportedLanguage.URDU:
-        return (
-            "Aap ka concern samajhti hoon, aur maazrat ke aap ki request abhi tak resolve nahin hui. "
-            "Main note kar rahi/raha hoon ke request pending hai. Barah-e-karam apna complaint ya reference "
-            "number available rakhein takay is maamle ko appropriate KE support channel ke through follow-up "
-            "kiya ja sake."
-        )
-    return (
-        "I understand your concern, and I apologize that your request has not yet been resolved. I will note "
-        "your concern that the request is still pending. Please keep your complaint or reference number "
-        "available so the matter can be followed up through the appropriate KE support channel."
-    )
+        return "Ji, main aap ki baat samajh raha hoon."
+    return "I understand your concern."
 
 
 def complaint_reference_question_line(language: SupportedLanguage) -> str:
     if language == SupportedLanguage.URDU:
-        return "Kya aap ke paas complaint ya request number maujood hai?"
-    return "Do you have your complaint or request number?"
+        return "Aap ki complaint ka reference number available hai?"
+    return "Do you have your complaint's reference number?"
 
 
 def customer_question_fallback_line(language: SupportedLanguage) -> str:
@@ -405,6 +432,27 @@ def customer_question_fallback_line(language: SupportedLanguage) -> str:
         "I understand your question. I don't want to provide you with incorrect information. Please contact "
         "KE customer service for verification and further assistance."
     )
+
+
+_AI_IDENTITY_RE = re.compile(r"\bare you (an?\s+)?(ai|a\.?i\.?|bot|robot|human|real|machine)\b")
+_AI_IDENTITY_PHRASES = (
+    "ap ai ho", "aap ai hain", "ap insaan ho", "aap insaan hain", "aap robot ho", "ap robot ho",
+    "kya ap ai", "kya aap ai", "insaan ho ya", "ai hai kya", "bot ho kya", "aap machine ho",
+)
+
+
+def _is_ai_identity_question(text: str) -> bool:
+    t = text.lower()
+    return bool(_AI_IDENTITY_RE.search(t)) or any(p in t for p in _AI_IDENTITY_PHRASES)
+
+
+def ai_identity_honest_line(language: SupportedLanguage) -> str:
+    """Spec 2026-08-09: never pretend to be human if directly asked --
+    honesty here takes priority over the generic "contact customer service"
+    deflection every other CUSTOMER_QUESTION gets."""
+    if language == SupportedLanguage.URDU:
+        return "Ji, main ek AI assistant hoon jo GSM Brothers ki taraf se K-Electric consumers ko call karta hai."
+    return "Yes, I'm an AI assistant calling on behalf of GSM Brothers for K-Electric."
 
 
 def angry_acknowledgment_line(language: SupportedLanguage) -> str:
@@ -875,6 +923,30 @@ def _classify_with_provider(
     raise ConfigurationError(f"unknown LLM provider {provider!r} in LLM_FALLBACK_ORDER")
 
 
+# A live call (2026-08-09) confirmed a real, measurable latency problem
+# feeding the "this doesn't feel like a natural conversation" complaint:
+# with Anthropic out of credit and DeepSeek out of credit, EVERY single
+# turn was burning ~2-3 seconds cascading through both of them (a real,
+# fast-failing HTTP round-trip each) before ever reaching Gemini -- pure
+# dead air for the caller on every turn, call after call. Once a provider
+# fails, skip it for a cooldown window instead of retrying the doomed call
+# every turn; it self-heals automatically once the window expires (e.g.
+# credit gets topped up, or a rate limit clears) without needing an app
+# restart. Module-level and deliberately shared across calls, not reset
+# per-call, since the whole point is not re-discovering the same outage on
+# every single turn of every single call.
+_PROVIDER_COOLDOWN_SECONDS = 120
+_provider_cooldown_until: dict[str, float] = {}
+
+
+def _provider_in_cooldown(provider: str) -> bool:
+    return time.monotonic() < _provider_cooldown_until.get(provider, 0.0)
+
+
+def _start_provider_cooldown(provider: str) -> None:
+    _provider_cooldown_until[provider] = time.monotonic() + _PROVIDER_COOLDOWN_SECONDS
+
+
 def _llm_classifier_with_fallback(
     stage: ClassificationStage,
     consumer: ConsumerRecord,
@@ -902,10 +974,13 @@ def _llm_classifier_with_fallback(
             continue
         if not getattr(settings, key_attr):
             continue
+        if _provider_in_cooldown(provider):
+            continue
         try:
             return _classify_with_provider(provider, stage, consumer, utterance, history, settings)
         except Exception:
             logger.exception("%s classifier failed for stage=%s; trying next provider", provider, stage.value)
+            _start_provider_cooldown(provider)
 
     logger.error("no configured LLM provider succeeded; falling back to keyword_fallback_classifier for this turn")
     return keyword_fallback_classifier(stage, consumer, utterance, history)
@@ -962,7 +1037,18 @@ def keyword_fallback_classifier(
     if any(p in text for p in ("call back", "callback", "baad mein call")):
         return CallDecision(intent=CustomerIntent.CALL_BACK, human_followup=True)
 
-    _cannot_pay_phrases = ("can't pay", "cant pay", "cannot pay", "no money", "don't have money", "dont have money", "paisay nahi", "abhi nahi", "need time", "waqt chahiye")
+    # A live scripted-conversation check (2026-08-09) found "mere paas itne
+    # paise nahi hain, main itna bill pay nahi kar sakta" ("I don't have that
+    # much money, I can't pay this much") falling through to the generic
+    # "pay" substring match below and getting misread as PROMISE_TO_PAY --
+    # negated pay/ada mentions ("pay nahi", "ada nahi", "...nahi kar sakta")
+    # and the "paise" (vs "paisay") spelling both needed covering.
+    _cannot_pay_phrases = (
+        "can't pay", "cant pay", "cannot pay", "no money", "don't have money", "dont have money",
+        "paisay nahi", "paise nahi", "abhi nahi", "need time", "waqt chahiye",
+        "pay nahi", "nahi pay", "ada nahi", "nahi ada", "afford nahi", "nahi afford",
+        "nahi kar sakta", "nahi kar sakti", "nahi kar sakte",
+    )
     if any(p in text for p in _cannot_pay_phrases):
         return CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True, notes=utterance)
 
@@ -1095,13 +1181,15 @@ class ConversationEngine:
             self.decision = decision.model_copy(update={"intent": CustomerIntent.VERIFICATION_FAILED, "next_action": "END_CALL"})
             return verification_failed_line(self.language)
 
-        # Verified (or classifier didn't explicitly fail it) -> inform dues + scheme.
+        # Verified (or classifier didn't explicitly fail it) -> state dues,
+        # then invite a response and listen (spec 2026-08-09 human-like
+        # calling agent: "state -> stop -> listen", not "read data -> fixed
+        # question"). The installment scheme is never mentioned proactively
+        # here -- it's only offered later, in _handle_main_response, if the
+        # customer says they can't pay the full amount (see NEEDS_MORE_TIME
+        # -> AWAITING_INSTALLMENT_INTEREST).
         self.decision = decision.model_copy(update={"verification_passed": True})
-        lines = [dues_line(self.consumer, self.language)]
-        scheme = scheme_line(self.consumer, self.language)
-        if scheme:
-            lines.append(scheme)
-        lines.append(main_question_line(self.language))
+        lines = [dues_line(self.consumer, self.language), payment_discussion_intro_line(self.language)]
         self.stage = ConversationStage.AWAITING_MAIN_RESPONSE
         return " ".join(lines)
 
@@ -1131,7 +1219,12 @@ class ConversationEngine:
             secondary = secondary_intent_line(decision, self.language)
             if secondary:
                 parts.append(secondary)
-            parts.append(customer_question_fallback_line(self.language))
+            # Spec 2026-08-09: never pretend to be human if asked directly --
+            # this takes priority over the generic customer-service deflection.
+            if _is_ai_identity_question(utterance):
+                parts.append(ai_identity_honest_line(self.language))
+            else:
+                parts.append(customer_question_fallback_line(self.language))
             return self._apply_tone(" ".join(parts), decision)
 
         if decision.intent == CustomerIntent.PROMISE_TO_PAY and decision.promise_to_pay_date is None:
@@ -1149,10 +1242,15 @@ class ConversationEngine:
         # Installment is only ever offered after the customer says they
         # can't pay -- never proactively (spec 2026-08-09 Dues & Installment
         # Logic) -- so NEEDS_MORE_TIME gets its own offer-then-confirm flow
-        # instead of the generic ack+question+close pattern.
+        # instead of the generic ack+question+close pattern. And only if a
+        # scheme is actually eligible/on record -- otherwise say so honestly
+        # (no_scheme_available_line) rather than inventing one.
         if decision.intent == CustomerIntent.NEEDS_MORE_TIME:
-            self.stage = ConversationStage.AWAITING_INSTALLMENT_INTEREST
-            return self._apply_tone(installment_offer_question_line(self.language), decision)
+            if self.consumer.installment_eligible:
+                self.stage = ConversationStage.AWAITING_INSTALLMENT_INTEREST
+                return self._apply_tone(installment_offer_question_line(self.language), decision)
+            self.stage = ConversationStage.ENDED
+            return self._apply_tone(no_scheme_available_line(self.language), decision)
 
         followup_question = _FOLLOWUP_QUESTION_BY_INTENT.get(decision.intent)
         if followup_question is not None:
@@ -1223,7 +1321,7 @@ class ConversationEngine:
 
         if decision.intent == CustomerIntent.NOT_MY_ADDRESS:
             self.stage = ConversationStage.AWAITING_ALTERNATE_CONTACT
-            return self._apply_tone(alternate_contact_request_line(self.language), decision)
+            return self._apply_tone(alternate_contact_request_line(self.consumer, self.language), decision)
 
         # Confirmed (or unclear) -- resume the normal conversation rather
         # than treating a mis-transcription as a second denial.

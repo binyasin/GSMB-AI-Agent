@@ -127,6 +127,8 @@ def finalize_call_attempt(
     attempt.verification_passed = decision.verification_passed
     attempt.human_followup = decision.human_followup
     attempt.do_not_call = decision.do_not_call
+    attempt.alternate_owner_contact = decision.alternate_owner_contact
+    attempt.payment_contact_number = decision.payment_contact_number
 
     job = session.get(CallJob, attempt.call_job_id)
     consumer = session.get(Consumer, job.consumer_id)
@@ -145,6 +147,10 @@ def finalize_call_attempt(
     consumer.agent_notes = decision.notes
     consumer.human_followup = decision.human_followup
     consumer.do_not_call = consumer.do_not_call or decision.do_not_call
+    if decision.alternate_owner_contact:
+        consumer.alternate_owner_contact = decision.alternate_owner_contact
+    if decision.payment_contact_number:
+        consumer.payment_contact_number = decision.payment_contact_number
     if decision.intent == CustomerIntent.ALREADY_PAID:
         consumer.already_paid = "CUSTOMER_CLAIMS_PAID"
     if decision.promise_to_pay_date:
@@ -211,6 +217,14 @@ def _build_sheet_updates(consumer: Consumer, attempt: CallAttempt) -> dict[str, 
         flag_notes.append(f"Already paid: {consumer.already_paid}")
     if consumer.human_followup:
         flag_notes.append("Human follow-up required")
+    # No dedicated sheet columns exist for these yet (spec 2026-08-09 Address
+    # Rule / Dues & Installment Logic) -- same bracketed-flag convention as
+    # already_paid/human_followup above keeps them visible without
+    # unilaterally adding new columns to the live production sheet.
+    if consumer.alternate_owner_contact:
+        flag_notes.append(f"ALTERNATE_OWNER_CONTACT: {consumer.alternate_owner_contact}")
+    if consumer.payment_contact_number:
+        flag_notes.append(f"PAYMENT_CONTACT_NUMBER: {consumer.payment_contact_number}")
     remarks = consumer.remarks or ""
     if flag_notes:
         remarks = (remarks + " " if remarks else "") + "[" + "; ".join(flag_notes) + "]"

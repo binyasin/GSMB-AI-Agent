@@ -99,6 +99,34 @@ def test_finalize_call_attempt_marks_already_paid_claim(db_session):
     assert consumer.human_followup is True
 
 
+def test_finalize_call_attempt_persists_alternate_and_payment_contacts(db_session):
+    """Spec 2026-08-09 Address Rule / Dues & Installment Logic: both fields
+    must reach the CallAttempt row (per-call record) and the Consumer row
+    (persists across calls), not just live in the in-memory CallDecision."""
+    _seed_queue(db_session)
+    job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=JOB_DATE).one()
+    acquire_job_lock(db_session, job)
+    from app.calling_agent import create_attempt
+
+    consumer = db_session.query(Consumer).filter_by(consumer_no="CN-001").one()
+    attempt = create_attempt(db_session, job, consumer)
+
+    decision = CallDecision(
+        intent=CustomerIntent.NOT_MY_ADDRESS,
+        human_followup=True,
+        alternate_owner_contact="+923001234567",
+        payment_contact_number="+923009876543",
+    )
+    finalize_call_attempt(db_session, attempt, decision, "[]", 40, CallState.COMPLETED)
+
+    db_session.refresh(attempt)
+    db_session.refresh(consumer)
+    assert attempt.alternate_owner_contact == "+923001234567"
+    assert attempt.payment_contact_number == "+923009876543"
+    assert consumer.alternate_owner_contact == "+923001234567"
+    assert consumer.payment_contact_number == "+923009876543"
+
+
 def test_sheet_sync_failure_does_not_lose_db_result(db_session):
     _seed_queue(db_session)
     job = db_session.query(CallJob).filter_by(consumer_no="CN-001", job_date=JOB_DATE).one()

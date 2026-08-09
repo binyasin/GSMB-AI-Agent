@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -75,7 +76,11 @@ def test_scheme_line_never_invents_numbers_beyond_sheet_data():
 # ---------------------------------------------------------------------------
 # Full conversation flow (fake classifier — no live LLM)
 # ---------------------------------------------------------------------------
-def test_verified_customer_hears_dues_and_scheme():
+def test_verified_customer_hears_dues_but_not_scheme_proactively():
+    """Spec 2026-08-09 Dues & Installment Logic: the scheme is never
+    mentioned upfront -- only dues, then the payment question. It's only
+    offered later if the customer says they can't pay (see
+    test_needs_more_time_offers_installment_then_captures_payment_contact)."""
     consumer = _consumer()
 
     def fake_classifier(stage, consumer, utterance, history):
@@ -85,7 +90,7 @@ def test_verified_customer_hears_dues_and_scheme():
     engine.start()
     line = engine.respond("Yes speaking")
     assert "12,500" in line
-    assert "installment" in line.lower()
+    assert "installment" not in line.lower()
     assert engine.stage == ConversationStage.AWAITING_MAIN_RESPONSE
 
 
@@ -156,7 +161,7 @@ def test_already_paid_sets_human_followup_language():
     engine.start()
     engine.respond("Yes speaking")
     line = engine.respond("I already paid this last week")
-    assert "verify the payment record" in line.lower()
+    assert "when was the payment made" in line.lower()
     assert engine.decision.human_followup is True
 
 
@@ -383,6 +388,59 @@ def test_installment_declined_closes_politely():
     assert "thank you" in line.lower() or "goodbye" in line.lower()
 
 
+def test_needs_more_time_with_no_scheme_available_says_so_honestly():
+    """Spec 2026-08-09 (human-like calling agent): if the customer can't pay
+    but the consumer record has no scheme (installment_eligible=False),
+    never invent one -- say so honestly and close, rather than falling
+    through to a bare generic goodbye with no explanation."""
+    consumer = _consumer(installment_eligible=False)
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_sequence(
+            CallDecision(intent=CustomerIntent.OTHER, verification_passed=True),
+            CallDecision(intent=CustomerIntent.NEEDS_MORE_TIME, human_followup=True),
+        ),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("I can't pay right now")
+
+    assert engine.stage == ConversationStage.ENDED
+    assert "don't currently have confirmed installment information" in line.lower()
+    assert "ke customer service centre" in line.lower()
+
+
+# ---------------------------------------------------------------------------
+# AI identity honesty (spec 2026-08-09): never pretend to be human if asked
+# ---------------------------------------------------------------------------
+def test_asking_if_ai_gets_an_honest_answer_not_the_generic_deflection():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("Wait, are you an AI?")
+
+    assert "ai assistant" in line.lower()
+    assert "customer service" not in line.lower()
+
+
+def test_unrelated_customer_question_still_gets_generic_deflection():
+    consumer = _consumer()
+    engine = ConversationEngine(
+        consumer, language=SupportedLanguage.ENGLISH,
+        classifier=_classifier_for(CallDecision(intent=CustomerIntent.CUSTOMER_QUESTION, human_followup=True)),
+    )
+    engine.start()
+    engine.respond("Yes speaking")
+    line = engine.respond("Why is my bill so high this month?")
+
+    assert "customer service" in line.lower()
+    assert "ai assistant" not in line.lower()
+
+
 def test_followup_stage_closes_the_call_on_the_next_response():
     consumer = _consumer()
     engine = ConversationEngine(
@@ -450,8 +508,8 @@ def test_secondary_intent_is_addressed_in_the_same_reply():
     engine.respond("Yes speaking")
     line = engine.respond("I already paid and my complaint was never resolved")
 
-    assert "verify the payment record" in line.lower()  # primary (ALREADY_PAID) ack
-    assert "resolved" in line.lower()  # secondary (COMPLAINT_NOT_ADDRESSED) ack
+    assert "when was the payment made" in line.lower()  # primary (ALREADY_PAID) ack
+    assert "understand your concern" in line.lower()  # secondary (COMPLAINT_NOT_ADDRESSED) ack
 
 
 def test_customer_angry_prepends_empathetic_line():
@@ -641,6 +699,56 @@ def test_fallback_chain_respects_custom_order(mocker):
     assert decision is expected
     mock_gemini.assert_called_once()
     mock_anthropic.assert_not_called()
+
+
+def test_fallback_chain_skips_a_provider_still_in_cooldown_after_a_prior_failure(mocker):
+    """Regression (2026-08-09): a live call confirmed real, measurable dead
+    air -- with Anthropic and DeepSeek both out of credit, every single
+    turn burned ~2-3s cascading through both failing HTTP calls before
+    reaching Gemini. Once a provider fails once, it must be skipped
+    (no HTTP call attempted at all) for the cooldown window instead of
+    being retried on every subsequent turn."""
+    from app.conversation_engine import _llm_classifier_with_fallback
+
+    settings = Settings(
+        ai_api_key="fake-anthropic-key",
+        gemini_api_key="fake-gemini-key",
+        llm_fallback_order="anthropic,gemini",
+    )
+    expected = CallDecision(intent=CustomerIntent.PROMISE_TO_PAY)
+    mock_anthropic = mocker.patch("app.conversation_engine.classify_with_llm", side_effect=RuntimeError("no credit"))
+    mock_gemini = mocker.patch("app.conversation_engine._classify_with_gemini", return_value=expected)
+
+    # Turn 1: anthropic is tried, fails, gemini picks it up -- and anthropic
+    # should now be in cooldown.
+    _llm_classifier_with_fallback(ClassificationStage.MAIN_RESPONSE, _consumer(), "turn one", [], settings=settings)
+    assert mock_anthropic.call_count == 1
+
+    # Turn 2 (same call, moments later): anthropic must be skipped entirely
+    # this time -- no second wasted HTTP round-trip.
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "turn two", [], settings=settings
+    )
+    assert decision is expected
+    assert mock_anthropic.call_count == 1  # NOT called again
+    assert mock_gemini.call_count == 2
+
+
+def test_provider_cooldown_expires_and_is_retried(mocker):
+    from app.conversation_engine import _llm_classifier_with_fallback, _start_provider_cooldown
+
+    settings = Settings(ai_api_key="fake-anthropic-key", llm_fallback_order="anthropic")
+    expected = CallDecision(intent=CustomerIntent.OTHER)
+    mock_anthropic = mocker.patch("app.conversation_engine.classify_with_llm", return_value=expected)
+
+    _start_provider_cooldown("anthropic")
+    mocker.patch("app.conversation_engine.time.monotonic", return_value=time.monotonic() + 999999)
+
+    decision = _llm_classifier_with_fallback(
+        ClassificationStage.MAIN_RESPONSE, _consumer(), "hello", [], settings=settings
+    )
+    assert decision is expected
+    mock_anthropic.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +979,11 @@ def test_keyword_fallback_detects_not_interested_variants(utterance):
         ("My complaint has not been resolved.", CustomerIntent.COMPLAINT_NOT_ADDRESSED),
         ("I don't have money to pay right now.", CustomerIntent.NEEDS_MORE_TIME),
         ("Why are you calling me?", CustomerIntent.CUSTOMER_QUESTION),
+        # Regression (2026-08-09): this fell through to the generic "pay"
+        # substring match and was misread as PROMISE_TO_PAY -- the word
+        # "pay" appears in "pay nahi kar sakta" too.
+        ("mere paas itne paise nahi hain, main itna bill pay nahi kar sakta", CustomerIntent.NEEDS_MORE_TIME),
+        ("ada nahi kar sakta abhi", CustomerIntent.NEEDS_MORE_TIME),
     ],
 )
 def test_keyword_fallback_detects_new_category_variants(utterance, expected_intent):

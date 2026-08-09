@@ -88,6 +88,12 @@ class Consumer(Base):
     human_followup: Mapped[bool] = mapped_column(Boolean, default=False)
     do_not_call: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Captured deterministically from the transcript (never LLM-authored,
+    # see conversation_engine._extract_phone_number) -- spec 2026-08-09
+    # Address Rule / Dues & Installment Logic.
+    alternate_owner_contact: Mapped[str | None] = mapped_column(String(32))
+    payment_contact_number: Mapped[str | None] = mapped_column(String(32))
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -148,6 +154,8 @@ class CallAttempt(Base):
     verification_passed: Mapped[bool | None] = mapped_column(Boolean)
     human_followup: Mapped[bool] = mapped_column(Boolean, default=False)
     do_not_call: Mapped[bool] = mapped_column(Boolean, default=False)
+    alternate_owner_contact: Mapped[str | None] = mapped_column(String(32))
+    payment_contact_number: Mapped[str | None] = mapped_column(String(32))
 
     sheet_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     sheet_sync_error: Mapped[str | None] = mapped_column(Text)

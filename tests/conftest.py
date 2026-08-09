@@ -31,6 +31,16 @@ def _clear_settings_cache(monkeypatch):
 
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     get_settings.cache_clear()
+
+    # _llm_classifier_with_fallback's provider cooldown cache is deliberately
+    # module-level/process-lifetime (see app/conversation_engine.py) so a
+    # real outage isn't rediscovered every turn -- but that means it's also
+    # shared across tests unless reset, and a mocked provider "failure" in
+    # one test would otherwise leak a cooldown into a later, unrelated test
+    # that expects that same provider name to actually be tried.
+    from app.conversation_engine import _provider_cooldown_until
+
+    _provider_cooldown_until.clear()
     yield
     get_settings.cache_clear()
 

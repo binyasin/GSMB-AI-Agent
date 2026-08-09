@@ -11,7 +11,9 @@ from app.conversation_engine import ConversationEngine
 from app.schemas import CallDecision, ConsumerRecord, CustomerIntent, SupportedLanguage
 from app.webhooks.media_stream import (
     ACTIVE_CONVERSATIONS,
+    _MEDIA_CHUNK_BYTES,
     _process_turn,
+    _synthesize_and_send,
     decode_media_payload,
     encode_media_payload,
     handle_turn_result,
@@ -264,3 +266,81 @@ async def test_process_turn_falls_back_to_interim_transcript_on_timeout():
 
     assert transcript == "meri baat abhi sun rahe hain"
     assert session.closed is True
+
+
+class FakeErroringTurnSession(FakeTurnSession):
+    """run() raises instead of returning -- simulates Google's streaming
+    session itself failing mid-turn (grpc OUT_OF_RANGE "Audio Timeout Error:
+    Long duration elapsed without audio", confirmed on a live call
+    2026-08-09 when the caller took a while to start speaking)."""
+
+    def run(self) -> str:
+        raise RuntimeError("Audio Timeout Error: Long duration elapsed without audio.")
+
+
+@pytest.mark.anyio
+async def test_process_turn_falls_back_to_interim_transcript_on_stt_session_error():
+    """Regression test: this exception previously propagated out of
+    _process_turn entirely and was caught by media_stream()'s top-level
+    handler, which ended the *whole call* over what should have just been
+    one failed turn. Must degrade the same way a soft timeout does instead."""
+    session = FakeErroringTurnSession()
+    session.latest_transcript = "hello"
+    speech_client = FakeSpeechClient(session)
+    ws = FakeWebSocket([])
+
+    transcript = await _process_turn(ws, speech_client, SupportedLanguage.ENGLISH)
+
+    assert transcript == "hello"
+
+
+# ---------------------------------------------------------------------------
+# _synthesize_and_send: outbound audio must be chunked, not sent as one
+# giant WebSocket message (reported live, 2026-08-09: choppy/broken-sounding
+# playback traced to exactly this -- Twilio can't start playing a frame
+# until the whole thing has arrived and decoded).
+# ---------------------------------------------------------------------------
+class FakeSendWebSocket:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(data)
+
+
+class FakeSynthesizeSpeechClient:
+    def __init__(self, audio_bytes: bytes):
+        self._audio = audio_bytes
+
+    def synthesize(self, text: str, language) -> bytes:
+        return self._audio
+
+
+@pytest.mark.anyio
+async def test_synthesize_and_send_chunks_audio_into_multiple_small_frames():
+    audio = bytes(range(256)) * 4  # 1024 bytes, well over one chunk
+    ws = FakeSendWebSocket()
+    speech_client = FakeSynthesizeSpeechClient(audio)
+
+    await _synthesize_and_send(ws, speech_client, "hello there", SupportedLanguage.ENGLISH, "MZ-test")
+
+    assert len(ws.sent) == -(-len(audio) // _MEDIA_CHUNK_BYTES)  # ceil division
+    assert len(ws.sent) > 1
+
+    reassembled = b"".join(decode_media_payload(json.loads(frame)) for frame in ws.sent)
+    assert reassembled == audio
+
+    first_chunk = decode_media_payload(json.loads(ws.sent[0]))
+    assert len(first_chunk) == _MEDIA_CHUNK_BYTES
+
+
+@pytest.mark.anyio
+async def test_synthesize_and_send_handles_audio_shorter_than_one_chunk():
+    audio = b"\x00\x01\x02"
+    ws = FakeSendWebSocket()
+    speech_client = FakeSynthesizeSpeechClient(audio)
+
+    await _synthesize_and_send(ws, speech_client, "hi", SupportedLanguage.ENGLISH, "MZ-test")
+
+    assert len(ws.sent) == 1
+    assert decode_media_payload(json.loads(ws.sent[0])) == audio
